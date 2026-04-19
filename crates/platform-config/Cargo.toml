@@ -1,0 +1,9 @@
+[package]
+name = "raccoon-platform-config"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+config = { version = "0.15.22", default-features = false, features = ["toml"] }
+serde = { version = "1.0.228", features = ["derive"] }
+thiserror = "2.0.18"
