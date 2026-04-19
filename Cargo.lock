@@ -58,6 +58,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "raccoon-platform-orchestration"
+version = "0.1.0"
+dependencies = [
+ "raccoon-platform-config",
+ "thiserror",
+]
+
+[[package]]
 name = "serde"
 version = "1.0.228"
 source = "registry+https://github.com/rust-lang/crates.io-index"

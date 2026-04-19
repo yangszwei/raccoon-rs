@@ -1,0 +1,8 @@
+[package]
+name = "raccoon-platform-orchestration"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+raccoon-platform-config = { path = "../platform-config" }
+thiserror = "2.0.18"
