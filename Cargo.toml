@@ -8,3 +8,4 @@ edition = "2024"
 
 [workspace.dependencies]
 opentelemetry = "0.31.0"
+tracing = "0.1.44"
