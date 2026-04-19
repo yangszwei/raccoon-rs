@@ -3,6 +3,7 @@ use serde::Deserialize;
 
 use crate::ConfigError;
 use crate::component::app::AppConfig;
+use crate::component::runtime::RuntimeConfig;
 use crate::component::telemetry::TelemetryConfig;
 
 /// Top-level configuration for the monolith runtime.
@@ -11,6 +12,9 @@ use crate::component::telemetry::TelemetryConfig;
 pub struct MonolithConfig {
     /// Application-level identity and process settings.
     pub app: AppConfig,
+
+    /// Runtime lifecycle configuration.
+    pub runtime: RuntimeConfig,
 
     /// Telemetry configuration, including logs, traces, and metrics.
     pub telemetry: TelemetryConfig,

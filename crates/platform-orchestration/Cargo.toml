@@ -5,5 +5,7 @@ edition.workspace = true
 
 [dependencies]
 raccoon-platform-config = { path = "../platform-config" }
+raccoon-platform-runtime = { path = "../platform-runtime" }
 raccoon-platform-telemetry = { path = "../platform-telemetry" }
 thiserror = "2.0.18"
+tokio = { version = "1.52.1", features = ["signal"] }
