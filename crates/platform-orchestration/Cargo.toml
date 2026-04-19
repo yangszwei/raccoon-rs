@@ -5,4 +5,5 @@ edition.workspace = true
 
 [dependencies]
 raccoon-platform-config = { path = "../platform-config" }
+raccoon-platform-telemetry = { path = "../platform-telemetry" }
 thiserror = "2.0.18"
