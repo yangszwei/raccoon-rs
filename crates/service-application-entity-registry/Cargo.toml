@@ -1,0 +1,11 @@
+[package]
+name = "raccoon-service-application-entity-registry"
+version.workspace = true
+edition.workspace = true
+
+[features]
+test-support = []
+
+[dependencies]
+thiserror = "2.0.18"
+tracing.workspace = true
