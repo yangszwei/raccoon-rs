@@ -829,6 +829,7 @@ dependencies = [
  "raccoon-platform-config",
  "raccoon-platform-runtime",
  "raccoon-platform-telemetry",
+ "raccoon-service-application-entity-registry",
  "thiserror",
  "tokio",
 ]

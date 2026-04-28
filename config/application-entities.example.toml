@@ -1,0 +1,15 @@
+[[application_entities.local]]
+title = "RACCOON"
+bind_address = "127.0.0.1:11112"
+max_concurrent_associations = 64
+read_timeout_seconds = 30 # omit to disable timeout
+write_timeout_seconds = 30 # omit to disable timeout
+max_pdu_length = 65536
+
+[[application_entities.peer]]
+title = "REMOTE_AE"
+address = "192.0.2.10:104"
+connect_timeout_seconds = 5 # omit to disable timeout
+read_timeout_seconds = 30 # omit to disable timeout
+write_timeout_seconds = 30 # omit to disable timeout
+max_pdu_length = 65536

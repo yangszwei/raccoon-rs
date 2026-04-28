@@ -3,6 +3,7 @@ use serde::Deserialize;
 
 use crate::ConfigError;
 use crate::component::app::AppConfig;
+use crate::component::application_entities::ApplicationEntitiesConfig;
 use crate::component::runtime::RuntimeConfig;
 use crate::component::telemetry::TelemetryConfig;
 
@@ -12,6 +13,9 @@ use crate::component::telemetry::TelemetryConfig;
 pub struct MonolithConfig {
     /// Application-level identity and process settings.
     pub app: AppConfig,
+
+    /// Local and peer DICOM application entity settings.
+    pub application_entities: ApplicationEntitiesConfig,
 
     /// Runtime lifecycle configuration.
     pub runtime: RuntimeConfig,
@@ -25,6 +29,7 @@ impl MonolithConfig {
     pub fn load() -> Result<Self, ConfigError> {
         Config::builder()
             .add_source(File::with_name("config/raccoon").required(false))
+            .add_source(File::with_name("config/application-entities").required(false))
             .add_source(File::with_name("raccoon").required(false))
             .add_source(Environment::with_prefix("RACCOON").separator("__"))
             .build()

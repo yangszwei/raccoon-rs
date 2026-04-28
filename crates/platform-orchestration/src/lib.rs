@@ -8,5 +8,6 @@
 
 pub mod error;
 pub mod platform;
+pub mod service;
 
 pub use error::OrchestrationError;

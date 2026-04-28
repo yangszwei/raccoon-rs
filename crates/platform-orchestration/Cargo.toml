@@ -7,5 +7,6 @@ edition.workspace = true
 raccoon-platform-config = { path = "../platform-config" }
 raccoon-platform-runtime = { path = "../platform-runtime" }
 raccoon-platform-telemetry = { path = "../platform-telemetry" }
+raccoon-service-application-entity-registry = { path = "../service-application-entity-registry" }
 thiserror = "2.0.18"
 tokio = { version = "1.52.1", features = ["signal"] }
