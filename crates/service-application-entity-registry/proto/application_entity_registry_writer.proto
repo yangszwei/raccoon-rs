@@ -1,0 +1,24 @@
+syntax = "proto3";
+
+package raccoon.application_entity_registry.v1;
+
+import "application_entity_registry.proto";
+
+service ApplicationEntityRegistryWriterService {
+  rpc InsertLocalApplicationEntity(InsertLocalApplicationEntityRequest)
+      returns (InsertLocalApplicationEntityResponse);
+  rpc InsertPeerApplicationEntity(InsertPeerApplicationEntityRequest)
+      returns (InsertPeerApplicationEntityResponse);
+}
+
+message InsertLocalApplicationEntityRequest {
+  LocalApplicationEntity application_entity = 1;
+}
+
+message InsertLocalApplicationEntityResponse {}
+
+message InsertPeerApplicationEntityRequest {
+  PeerApplicationEntity application_entity = 1;
+}
+
+message InsertPeerApplicationEntityResponse {}

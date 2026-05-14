@@ -2,7 +2,7 @@ use raccoon_platform_config::component::application_entities::{
     ApplicationEntitiesConfig, LocalApplicationEntityConfig, PeerApplicationEntityConfig,
 };
 use raccoon_service_application_entity_registry::{
-    ApplicationEntityError, ApplicationEntityRegistry, ApplicationEntityRegistryError,
+    ApplicationEntityError, ApplicationEntityRegistryError, InMemoryApplicationEntityRegistry,
     LocalApplicationEntity, PeerApplicationEntity,
 };
 
@@ -11,8 +11,8 @@ use crate::error::OrchestrationError;
 /// Build the application entity registry from loaded configuration.
 pub fn build_application_entity_registry(
     config: ApplicationEntitiesConfig,
-) -> Result<ApplicationEntityRegistry, OrchestrationError> {
-    ApplicationEntityRegistry::try_new(
+) -> Result<InMemoryApplicationEntityRegistry, OrchestrationError> {
+    InMemoryApplicationEntityRegistry::try_new(
         map_application_entities(&config.local, map_local_application_entity)?,
         map_application_entities(&config.peer, map_peer_application_entity)?,
     )

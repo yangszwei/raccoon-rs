@@ -1,0 +1,60 @@
+syntax = "proto3";
+
+package raccoon.application_entity_registry.v1;
+
+service ApplicationEntityRegistryService {
+  rpc ListLocalApplicationEntities(ListLocalApplicationEntitiesRequest)
+      returns (ListLocalApplicationEntitiesResponse);
+  rpc ListPeerApplicationEntities(ListPeerApplicationEntitiesRequest)
+      returns (ListPeerApplicationEntitiesResponse);
+  rpc GetLocalApplicationEntity(GetLocalApplicationEntityRequest)
+      returns (GetLocalApplicationEntityResponse);
+  rpc GetPeerApplicationEntity(GetPeerApplicationEntityRequest)
+      returns (GetPeerApplicationEntityResponse);
+}
+
+message LocalApplicationEntity {
+  string title = 1;
+  string bind_address = 2;
+  uint64 max_concurrent_associations = 3;
+  optional uint64 read_timeout_seconds = 4;
+  optional uint64 write_timeout_seconds = 5;
+  uint32 max_pdu_length = 6;
+}
+
+message PeerApplicationEntity {
+  string title = 1;
+  string address = 2;
+  optional uint64 connect_timeout_seconds = 3;
+  optional uint64 read_timeout_seconds = 4;
+  optional uint64 write_timeout_seconds = 5;
+  uint32 max_pdu_length = 6;
+}
+
+message ListLocalApplicationEntitiesRequest {}
+
+message ListLocalApplicationEntitiesResponse {
+  repeated LocalApplicationEntity application_entities = 1;
+}
+
+message ListPeerApplicationEntitiesRequest {}
+
+message ListPeerApplicationEntitiesResponse {
+  repeated PeerApplicationEntity application_entities = 1;
+}
+
+message GetLocalApplicationEntityRequest {
+  string title = 1;
+}
+
+message GetLocalApplicationEntityResponse {
+  optional LocalApplicationEntity application_entity = 1;
+}
+
+message GetPeerApplicationEntityRequest {
+  string title = 1;
+}
+
+message GetPeerApplicationEntityResponse {
+  optional PeerApplicationEntity application_entity = 1;
+}
