@@ -1,0 +1,30 @@
+[app]
+name = "raccoon-application-entity-registry"
+
+[grpc]
+bind_address = "127.0.0.1:50051"
+
+[runtime]
+shutdown_timeout_seconds = 30
+force_exit_on_timeout = false
+
+[telemetry]
+log_level = "info"
+log_format = "json"
+
+[telemetry.tracing]
+enabled = false
+
+[telemetry.tracing.exporter]
+endpoint = "http://127.0.0.1:4317"
+protocol = "grpc"
+timeout_seconds = 10
+
+[telemetry.metrics]
+enabled = false
+export_interval_seconds = 30
+
+[telemetry.metrics.exporter]
+endpoint = "http://127.0.0.1:4317"
+protocol = "grpc"
+timeout_seconds = 10

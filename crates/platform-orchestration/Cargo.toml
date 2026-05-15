@@ -3,6 +3,14 @@ name = "raccoon-platform-orchestration"
 version.workspace = true
 edition.workspace = true
 
+[features]
+default = []
+grpc = [
+    "dep:tonic",
+    "raccoon-service-application-entity-registry/grpc",
+    "tokio/sync",
+]
+
 [dependencies]
 raccoon-platform-config = { path = "../platform-config" }
 raccoon-platform-runtime = { path = "../platform-runtime" }
@@ -10,3 +18,4 @@ raccoon-platform-telemetry = { path = "../platform-telemetry" }
 raccoon-service-application-entity-registry = { path = "../service-application-entity-registry" }
 thiserror = "2.0.18"
 tokio = { version = "1.52.1", features = ["signal"] }
+tonic = { version = "0.14.6", optional = true }

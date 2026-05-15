@@ -1086,6 +1086,7 @@ dependencies = [
  "raccoon-service-application-entity-registry",
  "thiserror",
  "tokio",
+ "tonic",
 ]
 
 [[package]]

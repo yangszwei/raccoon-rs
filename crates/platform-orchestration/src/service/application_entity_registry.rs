@@ -1,9 +1,20 @@
+#[cfg(feature = "grpc")]
+use std::{net::SocketAddr, time::Duration};
+
 use raccoon_platform_config::component::application_entities::{
     ApplicationEntitiesConfig, LocalApplicationEntityConfig, PeerApplicationEntityConfig,
 };
+#[cfg(feature = "grpc")]
+use raccoon_platform_config::component::grpc::{GrpcClientConfig, GrpcServerConfig};
 use raccoon_service_application_entity_registry::{
     ApplicationEntityError, ApplicationEntityRegistryError, InMemoryApplicationEntityRegistry,
     LocalApplicationEntity, PeerApplicationEntity,
+};
+#[cfg(feature = "grpc")]
+use raccoon_service_application_entity_registry::{
+    ApplicationEntityRegistry, ApplicationEntityRegistryGrpcService,
+    ApplicationEntityRegistryServiceClient, ApplicationEntityRegistryServiceServer,
+    GrpcApplicationEntityRegistryClient,
 };
 
 use crate::error::OrchestrationError;
@@ -17,6 +28,42 @@ pub fn build_application_entity_registry(
         map_application_entities(&config.peer, map_peer_application_entity)?,
     )
     .map_err(OrchestrationError::from)
+}
+
+/// Build a gRPC-backed application entity registry client.
+#[cfg(feature = "grpc")]
+pub async fn build_grpc_application_entity_registry_client(
+    config: &GrpcClientConfig,
+) -> Result<GrpcApplicationEntityRegistryClient, OrchestrationError> {
+    let endpoint = grpc_client_endpoint(config)?;
+    let server_address = endpoint.uri().to_string();
+    let inner = ApplicationEntityRegistryServiceClient::connect(endpoint).await?;
+
+    Ok(GrpcApplicationEntityRegistryClient::with_server_address(
+        inner,
+        server_address,
+    ))
+}
+
+/// Build a gRPC application entity registry server.
+#[cfg(feature = "grpc")]
+pub fn build_grpc_application_entity_registry_server<R>(
+    config: &GrpcServerConfig,
+    registry: R,
+) -> Result<
+    (
+        SocketAddr,
+        ApplicationEntityRegistryServiceServer<ApplicationEntityRegistryGrpcService<R>>,
+    ),
+    OrchestrationError,
+>
+where
+    R: ApplicationEntityRegistry + Send + Sync + 'static,
+{
+    let bind_address = config.bind_address.parse()?;
+    let server = ApplicationEntityRegistryGrpcService::new(registry).into_server();
+
+    Ok((bind_address, server))
 }
 
 fn map_application_entities<T, U, E>(
@@ -57,4 +104,21 @@ fn map_peer_application_entity(
         config.write_timeout_seconds,
         config.max_pdu_length,
     )
+}
+
+#[cfg(feature = "grpc")]
+fn grpc_client_endpoint(
+    config: &GrpcClientConfig,
+) -> Result<tonic::transport::Endpoint, OrchestrationError> {
+    let mut endpoint = tonic::transport::Endpoint::from_shared(config.endpoint.clone())?;
+
+    if let Some(seconds) = config.connect_timeout_seconds {
+        endpoint = endpoint.connect_timeout(Duration::from_secs(seconds));
+    }
+
+    if let Some(seconds) = config.request_timeout_seconds {
+        endpoint = endpoint.timeout(Duration::from_secs(seconds));
+    }
+
+    Ok(endpoint)
 }
