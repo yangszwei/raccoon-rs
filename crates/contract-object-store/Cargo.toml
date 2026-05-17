@@ -1,0 +1,13 @@
+[package]
+name = "raccoon-contract-object-store"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+async-trait = "0.1.89"
+bytes = "1.11.0"
+futures-core = "0.3.32"
+thiserror = "2.0.18"
+
+[dev-dependencies]
+tokio = { version = "1.52.3", features = ["macros", "rt"] }
