@@ -6,6 +6,8 @@
 //! follow the same naming rule as the workspace directory prefixes by their
 //! internal role.
 
+pub mod adapter;
+pub mod contract;
 pub mod error;
 pub mod platform;
 pub mod service;

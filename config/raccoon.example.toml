@@ -9,6 +9,12 @@ log_format = "json"
 shutdown_timeout_seconds = 30
 force_exit_on_timeout = false
 
+[filesystem]
+root = "data"
+
+[storage]
+backend = "filesystem"
+
 [telemetry.tracing]
 enabled = false
 

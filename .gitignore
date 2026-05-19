@@ -3,3 +3,5 @@
 /config/*.toml
 !/config/*.example.toml
 /raccoon.toml
+
+/data

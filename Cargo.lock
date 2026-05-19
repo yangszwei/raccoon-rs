@@ -1102,6 +1102,8 @@ dependencies = [
 name = "raccoon-platform-orchestration"
 version = "0.1.0"
 dependencies = [
+ "raccoon-adapter-object-store-filesystem",
+ "raccoon-contract-object-store",
  "raccoon-platform-config",
  "raccoon-platform-runtime",
  "raccoon-platform-telemetry",

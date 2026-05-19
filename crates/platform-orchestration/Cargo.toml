@@ -12,6 +12,8 @@ grpc = [
 ]
 
 [dependencies]
+raccoon-adapter-object-store-filesystem = { path = "../adapter-object-store-filesystem" }
+raccoon-contract-object-store = { path = "../contract-object-store" }
 raccoon-platform-config = { path = "../platform-config" }
 raccoon-platform-runtime = { path = "../platform-runtime" }
 raccoon-platform-telemetry = { path = "../platform-telemetry" }

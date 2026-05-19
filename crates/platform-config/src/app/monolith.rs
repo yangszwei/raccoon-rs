@@ -4,7 +4,9 @@ use serde::Deserialize;
 use crate::ConfigError;
 use crate::component::app::AppConfig;
 use crate::component::application_entities::ApplicationEntitiesConfig;
+use crate::component::filesystem::FilesystemConfig;
 use crate::component::runtime::RuntimeConfig;
+use crate::component::storage::StorageConfig;
 use crate::component::telemetry::TelemetryConfig;
 
 /// Top-level configuration for the monolith runtime.
@@ -19,6 +21,12 @@ pub struct MonolithConfig {
 
     /// Runtime lifecycle configuration.
     pub runtime: RuntimeConfig,
+
+    /// Local filesystem configuration.
+    pub filesystem: FilesystemConfig,
+
+    /// Object storage backend configuration.
+    pub storage: StorageConfig,
 
     /// Telemetry configuration, including logs, traces, and metrics.
     pub telemetry: TelemetryConfig,
