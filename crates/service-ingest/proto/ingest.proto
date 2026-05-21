@@ -1,0 +1,170 @@
+syntax = "proto3";
+
+package raccoon.ingest.v1;
+
+service IngestTransportService {
+  rpc StreamIngest(stream IngestTransportRequest)
+      returns (stream IngestTransportResponse);
+}
+
+message IngestTransportRequest {
+  oneof message {
+    IngestSessionBegin session_begin = 1;
+    IngestObjectBegin object_begin = 2;
+    IngestBodyChunk body_chunk = 3;
+    IngestObjectEnd object_end = 4;
+    IngestSessionEnd session_end = 5;
+  }
+}
+
+message IngestTransportResponse {
+  oneof message {
+    IngestObjectResult object_result = 1;
+    IngestUploadResult upload_result = 2;
+  }
+}
+
+message IngestSessionBegin {
+  string upload_id = 1;
+  IngestSource source = 2;
+}
+
+message IngestObjectBegin {
+  optional string ingest_object_id = 1;
+  IngestObjectIdentity identity_hints = 2;
+  IngestPayloadRepresentation payload_representation = 3;
+  optional string transfer_syntax_uid = 4;
+  optional string expected_study_instance_uid = 5;
+  optional IngestChecksum checksum = 6;
+}
+
+message IngestBodyChunk {
+  bytes data = 1;
+}
+
+message IngestObjectEnd {}
+
+message IngestSessionEnd {}
+
+message IngestSource {
+  optional string request_id = 1;
+  optional string correlation_id = 2;
+  optional string source_ae = 3;
+  optional string source_application = 4;
+  optional string protocol = 5;
+  optional string content_type = 6;
+}
+
+message IngestObjectIdentity {
+  optional string sop_class_uid = 1;
+  optional string study_instance_uid = 2;
+  optional string series_instance_uid = 3;
+  optional string sop_instance_uid = 4;
+}
+
+message IngestChecksum {
+  IngestChecksumAlgorithm algorithm = 1;
+  string value = 2;
+}
+
+enum IngestChecksumAlgorithm {
+  INGEST_CHECKSUM_ALGORITHM_UNSPECIFIED = 0;
+  INGEST_CHECKSUM_ALGORITHM_SHA256 = 1;
+}
+
+enum IngestPayloadRepresentation {
+  INGEST_PAYLOAD_REPRESENTATION_UNSPECIFIED = 0;
+  INGEST_PAYLOAD_REPRESENTATION_DICOM_FILE = 1;
+  INGEST_PAYLOAD_REPRESENTATION_DICOM_DATA_SET = 2;
+  INGEST_PAYLOAD_REPRESENTATION_DICOM_WEB_METADATA_AND_BULK_DATA = 3;
+  INGEST_PAYLOAD_REPRESENTATION_UNKNOWN = 4;
+}
+
+enum IngestObjectState {
+  INGEST_OBJECT_STATE_UNSPECIFIED = 0;
+  INGEST_OBJECT_STATE_RECEIVED = 1;
+  INGEST_OBJECT_STATE_PENDING_SYNC = 2;
+  INGEST_OBJECT_STATE_QUARANTINED = 3;
+}
+
+message IngestObjectResult {
+  string ingest_object_id = 1;
+  string upload_id = 2;
+  optional string object_key = 3;
+  optional uint64 content_length = 4;
+  optional string etag = 5;
+  optional IngestChecksum checksum = 6;
+  IngestObjectIdentity identity = 7;
+  IngestPayloadRepresentation payload_representation = 8;
+  optional string transfer_syntax_uid = 9;
+  IngestObjectState state = 10;
+  IngestObjectOutcome outcome = 11;
+}
+
+message IngestUploadResult {
+  string upload_id = 1;
+  uint64 total_object_count = 2;
+  uint64 accepted_count = 3;
+  uint64 failed_count = 4;
+  repeated IngestObjectOutcome object_outcomes = 5;
+  IngestBatchRepositoryStatus repository_status = 6;
+}
+
+message IngestBatchRepositoryStatus {
+  oneof status {
+    IngestBatchRepositoryRecorded recorded = 1;
+    IngestBatchRepositoryFailed failed = 2;
+  }
+}
+
+message IngestBatchRepositoryRecorded {}
+
+message IngestBatchRepositoryFailed {
+  string reason = 1;
+}
+
+message IngestObjectOutcome {
+  oneof outcome {
+    IngestStoredOutcome stored = 1;
+    IngestRejectedCannotUnderstand rejected_cannot_understand = 2;
+    IngestRejectedUnsupportedSopClass rejected_unsupported_sop_class = 3;
+    IngestRejectedStudyMismatch rejected_study_mismatch = 4;
+    IngestRejectedChecksumMismatch rejected_checksum_mismatch = 5;
+    IngestRejectedTooLarge rejected_too_large = 6;
+    IngestObjectStoreFailed object_store_failed = 7;
+    IngestRepositoryFailed repository_failed = 8;
+  }
+}
+
+message IngestStoredOutcome {}
+
+message IngestRejectedCannotUnderstand {
+  string reason = 1;
+}
+
+message IngestRejectedUnsupportedSopClass {
+  optional string sop_class_uid = 1;
+  string reason = 2;
+}
+
+message IngestRejectedStudyMismatch {
+  string expected_study_instance_uid = 1;
+  optional string actual_study_instance_uid = 2;
+}
+
+message IngestRejectedChecksumMismatch {
+  string expected = 1;
+  string actual = 2;
+}
+
+message IngestRejectedTooLarge {
+  uint64 max_content_length = 1;
+}
+
+message IngestObjectStoreFailed {
+  string reason = 1;
+}
+
+message IngestRepositoryFailed {
+  string reason = 1;
+}

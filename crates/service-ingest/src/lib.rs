@@ -8,6 +8,8 @@
 
 mod acceptance;
 mod error;
+#[cfg(feature = "grpc")]
+mod grpc;
 mod identity;
 mod key;
 mod model;
@@ -20,6 +22,11 @@ pub use acceptance::{
 };
 pub(crate) use acceptance::{StorageAcceptanceDecision, StorageAcceptanceInput};
 pub use error::{IngestError, IngestRepositoryError};
+#[cfg(feature = "grpc")]
+pub use grpc::{
+    GrpcIngestTransportClient, IngestTransportGrpcService, IngestTransportService,
+    IngestTransportServiceClient, IngestTransportServiceServer,
+};
 pub use identity::{IngestObjectId, IngestUploadId};
 pub(crate) use key::IngestObjectKeyBuilder;
 pub(crate) use model::ParsedDicomObject;

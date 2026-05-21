@@ -1489,13 +1489,21 @@ dependencies = [
  "dicom-dictionary-std",
  "dicom-object",
  "futures-util",
+ "opentelemetry",
+ "prost",
+ "protoc-bin-vendored",
  "raccoon-contract-object-store",
  "sha2",
  "tempfile",
  "thiserror",
  "tokio",
+ "tokio-stream",
  "tokio-util",
+ "tonic",
+ "tonic-prost",
+ "tonic-prost-build",
  "tracing",
+ "tracing-opentelemetry",
  "uuid",
 ]
 
@@ -1804,6 +1812,7 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]

@@ -243,12 +243,12 @@ pub struct ReceivedIngestObject {
     pub payload_representation: IngestPayloadRepresentation,
     pub transfer_syntax_uid: Option<String>,
     pub source: IngestSource,
+    /// Processing state — used by the service to distinguish accepted from
+    /// quarantined objects. Not persisted: sync lifecycle is owned by the
+    /// sync tier, not this write-side store.
     pub state: IngestObjectState,
     pub outcome: IngestObjectOutcome,
     pub received_at: SystemTime,
-    pub synced_at: Option<SystemTime>,
-    pub quarantined_at: Option<SystemTime>,
-    pub delete_eligible_at: Option<SystemTime>,
 }
 
 /// Per-object ingest result.

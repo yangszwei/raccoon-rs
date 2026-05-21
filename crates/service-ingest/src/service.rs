@@ -697,9 +697,6 @@ fn received_record(
         state,
         outcome: record.outcome,
         received_at: now,
-        synced_at: None,
-        quarantined_at: (state == IngestObjectState::Quarantined).then_some(now),
-        delete_eligible_at: None,
     }
 }
 
@@ -1210,7 +1207,6 @@ mod tests {
         let records = repository.records.lock().unwrap();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].state, IngestObjectState::Quarantined);
-        assert!(records[0].quarantined_at.is_some());
     }
 
     #[tokio::test]
