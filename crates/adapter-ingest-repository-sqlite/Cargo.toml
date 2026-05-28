@@ -1,0 +1,16 @@
+[package]
+name = "raccoon-adapter-ingest-repository-sqlite"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+async-trait = "0.1.89"
+raccoon-service-ingest = { path = "../service-ingest" }
+sqlx = { version = "0.9.0", default-features = false, features = ["sqlite", "runtime-tokio", "migrate", "macros"] }
+thiserror = "2.0.18"
+tracing.workspace = true
+
+[dev-dependencies]
+raccoon-contract-object-store = { path = "../contract-object-store" }
+tokio = { version = "1.52.3", features = ["macros", "rt"] }
+uuid = { version = "1.23.1", default-features = false, features = ["std"] }
