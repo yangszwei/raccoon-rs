@@ -1,6 +1,9 @@
 [app]
 name = "raccoon"
 
+[database]
+type = "sqlite"
+
 [telemetry]
 log_level = "info"
 log_format = "json"

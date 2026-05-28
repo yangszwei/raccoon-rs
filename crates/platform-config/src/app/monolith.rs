@@ -4,6 +4,7 @@ use serde::Deserialize;
 use crate::ConfigError;
 use crate::component::app::AppConfig;
 use crate::component::application_entities::ApplicationEntitiesConfig;
+use crate::component::database::DatabaseConfig;
 use crate::component::filesystem::FilesystemConfig;
 use crate::component::runtime::RuntimeConfig;
 use crate::component::storage::StorageConfig;
@@ -18,6 +19,9 @@ pub struct MonolithConfig {
 
     /// Local and peer DICOM application entity settings.
     pub application_entities: ApplicationEntitiesConfig,
+
+    /// Database backend configuration.
+    pub database: DatabaseConfig,
 
     /// Runtime lifecycle configuration.
     pub runtime: RuntimeConfig,

@@ -13,6 +13,12 @@ pub enum OrchestrationError {
     #[error(transparent)]
     Config(#[from] raccoon_platform_config::ConfigError),
 
+    /// SQLite ingest repository could not be opened or migrated.
+    #[error(transparent)]
+    SqliteIngestRepository(
+        #[from] raccoon_adapter_ingest_repository_sqlite::SqliteIngestRepositoryError,
+    ),
+
     /// Configured network address could not be parsed.
     #[cfg(feature = "grpc")]
     #[error(transparent)]
@@ -21,6 +27,10 @@ pub enum OrchestrationError {
     /// Telemetry could not be initialized.
     #[error(transparent)]
     Telemetry(#[from] raccoon_platform_telemetry::TelemetryError),
+
+    /// Filesystem operation failed.
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
 
     /// gRPC transport could not be prepared.
     #[cfg(feature = "grpc")]

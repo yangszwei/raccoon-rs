@@ -12,6 +12,7 @@ grpc = [
 ]
 
 [dependencies]
+raccoon-adapter-ingest-repository-sqlite = { path = "../adapter-ingest-repository-sqlite" }
 raccoon-adapter-object-store-filesystem = { path = "../adapter-object-store-filesystem" }
 raccoon-contract-object-store = { path = "../contract-object-store" }
 raccoon-platform-config = { path = "../platform-config" }
