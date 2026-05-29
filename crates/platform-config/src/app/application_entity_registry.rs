@@ -15,11 +15,11 @@ pub struct ApplicationEntityRegistryServiceConfig {
     /// Application-level identity and process settings.
     pub app: AppConfig,
 
-    /// gRPC server listener settings for the registry service.
-    pub grpc: GrpcServerConfig,
-
     /// Initial local and peer DICOM application entity settings.
     pub application_entities: ApplicationEntitiesConfig,
+
+    /// gRPC server listener settings for the registry service.
+    pub grpc: GrpcServerConfig,
 
     /// Runtime lifecycle configuration.
     pub runtime: RuntimeConfig,

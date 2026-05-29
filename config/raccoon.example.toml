@@ -4,19 +4,19 @@ name = "raccoon"
 [database]
 type = "sqlite"
 
-[telemetry]
-log_level = "info"
-log_format = "json"
+[filesystem]
+root = "data"
 
 [runtime]
 shutdown_timeout_seconds = 30
 force_exit_on_timeout = false
 
-[filesystem]
-root = "data"
-
 [storage]
 backend = "filesystem"
+
+[telemetry]
+log_level = "info"
+log_format = "json"
 
 [telemetry.tracing]
 enabled = false

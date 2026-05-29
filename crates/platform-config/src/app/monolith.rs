@@ -23,11 +23,11 @@ pub struct MonolithConfig {
     /// Database backend configuration.
     pub database: DatabaseConfig,
 
-    /// Runtime lifecycle configuration.
-    pub runtime: RuntimeConfig,
-
     /// Local filesystem configuration.
     pub filesystem: FilesystemConfig,
+
+    /// Runtime lifecycle configuration.
+    pub runtime: RuntimeConfig,
 
     /// Object storage backend configuration.
     pub storage: StorageConfig,
