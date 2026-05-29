@@ -1,0 +1,19 @@
+[package]
+name = "raccoon-protocol-dimse"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+async-trait = "0.1.89"
+bytes = "1.11.1"
+dicom-core = "0.9.1"
+dicom-dictionary-std = "0.9.0"
+dicom-object = "0.9.1"
+dicom-transfer-syntax-registry = "0.9.1"
+dicom-ul = { version = "0.9.1", features = ["async"] }
+raccoon-contract-object-store = { path = "../contract-object-store" }
+raccoon-service-application-entity-registry = { path = "../service-application-entity-registry" }
+raccoon-service-ingest = { path = "../service-ingest" }
+thiserror = "2.0.18"
+tokio = { version = "1.52.3", features = ["io-util", "net", "rt", "macros"] }
+tracing.workspace = true

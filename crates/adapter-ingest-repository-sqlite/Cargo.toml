@@ -13,4 +13,4 @@ tracing.workspace = true
 [dev-dependencies]
 raccoon-contract-object-store = { path = "../contract-object-store" }
 tokio = { version = "1.52.3", features = ["macros", "rt"] }
-uuid = { version = "1.23.1", default-features = false, features = ["std"] }
+uuid = "1.23.2"

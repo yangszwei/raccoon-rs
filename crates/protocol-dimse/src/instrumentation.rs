@@ -1,0 +1,7 @@
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static NEXT_ASSOCIATION_ID: AtomicU64 = AtomicU64::new(1);
+
+pub(crate) fn next_association_id() -> u64 {
+    NEXT_ASSOCIATION_ID.fetch_add(1, Ordering::Relaxed)
+}
