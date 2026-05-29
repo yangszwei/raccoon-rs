@@ -18,7 +18,9 @@ raccoon-contract-object-store = { path = "../contract-object-store" }
 raccoon-platform-config = { path = "../platform-config" }
 raccoon-platform-runtime = { path = "../platform-runtime" }
 raccoon-platform-telemetry = { path = "../platform-telemetry" }
+raccoon-protocol-dimse = { path = "../protocol-dimse" }
 raccoon-service-application-entity-registry = { path = "../service-application-entity-registry" }
+raccoon-service-ingest = { path = "../service-ingest" }
 thiserror = "2.0.18"
 tokio = { version = "1.52.1", features = ["signal"] }
 tonic = { version = "0.14.6", optional = true }

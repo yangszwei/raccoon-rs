@@ -10,6 +10,7 @@ pub mod adapter;
 pub mod contract;
 pub mod error;
 pub mod platform;
+pub mod protocol;
 pub mod service;
 
 pub use error::OrchestrationError;

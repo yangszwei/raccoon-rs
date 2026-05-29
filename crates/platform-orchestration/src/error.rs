@@ -32,6 +32,10 @@ pub enum OrchestrationError {
     #[error(transparent)]
     Io(#[from] std::io::Error),
 
+    /// DIMSE listener could not be bound.
+    #[error(transparent)]
+    Dimse(#[from] raccoon_protocol_dimse::DimseError),
+
     /// gRPC transport could not be prepared.
     #[cfg(feature = "grpc")]
     #[error(transparent)]
