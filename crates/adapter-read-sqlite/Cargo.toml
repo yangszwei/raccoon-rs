@@ -1,0 +1,19 @@
+[package]
+name = "raccoon-adapter-read-sqlite"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+async-trait = "0.1.89"
+dicom-core = "0.9.1"
+dicom-dictionary-std = "0.9.0"
+dicom-json = "0.9.0"
+dicom-object = "0.9.1"
+raccoon-service-query = { path = "../service-query" }
+serde_json = "1.0"
+sqlx = { version = "0.9.0", default-features = false, features = ["sqlite", "runtime-tokio", "migrate", "macros", "json"] }
+thiserror = "2.0.18"
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { version = "1.52.3", features = ["macros", "rt"] }

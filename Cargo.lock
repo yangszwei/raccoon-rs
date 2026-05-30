@@ -378,6 +378,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "dicom-json"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3dc0aee5ff26ec43a9d6f8373030c733b27e6110f717d9fc98e4787dc0cbc569"
+dependencies = [
+ "base64",
+ "dicom-core",
+ "dicom-dictionary-std",
+ "dicom-object",
+ "num-traits",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
 name = "dicom-object"
 version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1978,6 +1994,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "raccoon-adapter-read-sqlite"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "dicom-core",
+ "dicom-dictionary-std",
+ "dicom-json",
+ "dicom-object",
+ "raccoon-service-query",
+ "serde_json",
+ "sqlx",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "raccoon-contract-dicom"
 version = "0.1.0"
 dependencies = [
@@ -2205,6 +2238,7 @@ version = "1.0.149"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "83fc039473c5595ace860d8c4fafa220ff474b3fc6bfdb4293327f1a37e94d86"
 dependencies = [
+ "indexmap",
  "itoa",
  "memchr",
  "serde",
@@ -2423,6 +2457,8 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "sqlx-core",
+ "sqlx-mysql",
+ "sqlx-postgres",
  "sqlx-sqlite",
  "syn",
  "thiserror",
