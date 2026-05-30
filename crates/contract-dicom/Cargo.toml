@@ -1,0 +1,7 @@
+[package]
+name = "raccoon-contract-dicom"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+thiserror = "2.0.18"

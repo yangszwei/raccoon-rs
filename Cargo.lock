@@ -1978,6 +1978,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "raccoon-contract-dicom"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
+]
+
+[[package]]
 name = "raccoon-contract-object-store"
 version = "0.1.0"
 dependencies = [
