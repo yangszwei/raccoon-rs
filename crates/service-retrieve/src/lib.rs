@@ -11,12 +11,19 @@
 //! time as the caller consumes [`RetrieveResult::stream`]).
 
 mod error;
+#[cfg(feature = "grpc")]
+mod grpc;
 mod model;
 mod repository;
 mod scope;
 mod service;
 
 pub use error::{RetrieveError, RetrieveRepositoryError};
+#[cfg(feature = "grpc")]
+pub use grpc::{
+    DicomRetrieveService, DicomRetrieveServiceClient, DicomRetrieveServiceServer,
+    GrpcRetrieveServiceClient, RetrieveGrpcService,
+};
 pub use model::{InstanceRef, RetrieveResult, RetrieveStream, RetrievedInstance};
 pub use repository::RetrieveRepository;
 pub use scope::{RetrieveRequest, RetrieveScope};

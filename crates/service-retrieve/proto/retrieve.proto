@@ -1,0 +1,87 @@
+syntax = "proto3";
+
+package raccoon.retrieve.v1;
+
+// Protocol-neutral DICOM Retrieve service.
+service DicomRetrieveService {
+  // Resolve the retrieve scope and stream instance bodies.
+  //
+  // Stream protocol:
+  // - One RetrieveHeader with the total instance count.
+  // - InstanceBegin, BodyChunk*, and InstanceEnd per item.
+  // - InstanceError reports an object store failure for one instance.
+  rpc Retrieve(RetrieveRequest) returns (stream RetrieveResponse);
+}
+
+// DICOM information hierarchy level to retrieve.
+message RetrieveRequest {
+  RetrieveScope scope = 1;
+}
+
+// DICOM resources to retrieve.
+message RetrieveScope {
+  oneof scope {
+    // All instances for a patient.
+    string patient_id = 1;
+    // All instances belonging to a study.
+    string study_instance_uid = 2;
+    // All instances belonging to a series.
+    string series_instance_uid = 3;
+    // A single SOP instance.
+    string sop_instance_uid = 4;
+  }
+}
+
+// Server-streamed retrieve message.
+message RetrieveResponse {
+  oneof message {
+    // First message in the stream.
+    RetrieveHeader header = 1;
+    // Per-instance metadata sent before its body chunks.
+    InstanceBegin instance_begin = 2;
+    // Raw object bytes for the current instance.
+    BodyChunk body_chunk = 3;
+    // Marks a completed instance body.
+    InstanceEnd instance_end = 4;
+    // Per-instance object store failure.
+    InstanceError instance_error = 5;
+  }
+}
+
+// First message in every Retrieve stream.
+message RetrieveHeader {
+  // Number of instances the service will attempt to deliver.
+  uint64 instance_count = 1;
+  // Sum of pre-known instance sizes, when available for every instance.
+  optional uint64 total_content_length = 2;
+}
+
+// Per-instance metadata sent before the body chunks.
+message InstanceBegin {
+  DicomInstanceIdentity identity = 1;
+  // Transfer syntax for the object bytes.
+  optional string transfer_syntax_uid = 2;
+  // Exact byte count as reported by the object store.
+  uint64 content_length = 3;
+}
+
+// Full DICOM instance identity.
+message DicomInstanceIdentity {
+  string study_instance_uid = 1;
+  string series_instance_uid = 2;
+  string sop_instance_uid = 3;
+  string sop_class_uid = 4;
+}
+
+// Raw byte chunk for the current instance.
+message BodyChunk {
+  bytes data = 1;
+}
+
+// Marks successful delivery of an instance body.
+message InstanceEnd {}
+
+// Reports an object store failure for one instance.
+message InstanceError {
+  string reason = 1;
+}
