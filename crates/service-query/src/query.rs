@@ -12,6 +12,24 @@ pub enum QueryRetrieveView {
     Enhanced,
 }
 
+/// Sort direction for a [`SortKey`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SortDirection {
+    Ascending,
+    Descending,
+}
+
+/// A single sort criterion for a [`DicomQuery`].
+///
+/// The [`path`][SortKey::path] must be a single-tag attribute path with no
+/// item selectors; the bridge must also ensure each sort key attribute is
+/// included in the projection.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SortKey {
+    pub path: AttributePath,
+    pub direction: SortDirection,
+}
+
 /// Which DICOM information model and level a [`DicomQuery`] targets.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum QueryScope {
@@ -121,6 +139,11 @@ pub struct DicomQuery {
     /// unique-key presence and above-level key constraints; this flag signals
     /// that those constraints are relaxed by explicit SCU/SCP negotiation.
     pub(crate) relational_query: bool,
+    /// Ordered list of sort criteria (PS3.4 C.2.2.3.2 extended negotiation).
+    /// An empty list means the repository chooses the order (typically newest-
+    /// synced-first).  The bridge is responsible for declaring the negotiation
+    /// before populating this field.
+    pub(crate) sort_keys: Vec<SortKey>,
 }
 
 impl DicomQuery {
@@ -140,6 +163,7 @@ impl DicomQuery {
             specific_character_set: None,
             query_retrieve_view: None,
             relational_query: false,
+            sort_keys: Vec::new(),
         })
     }
 
@@ -250,6 +274,30 @@ impl DicomQuery {
 
     pub fn relational_query(&self) -> bool {
         self.relational_query
+    }
+
+    /// Attaches an ordered list of sort criteria.
+    ///
+    /// Fails if any sort key path is structurally invalid or contains an item
+    /// selector.  Sort key paths must be single-tag paths; sequence-navigating
+    /// paths are not supported as sort keys.
+    pub fn with_sort_keys(mut self, keys: Vec<SortKey>) -> Result<Self, QueryError> {
+        for key in &keys {
+            key.path
+                .validate()
+                .map_err(|e| QueryError::invalid_query(e.to_string()))?;
+            if key.path.contains_item_selector() {
+                return Err(QueryError::invalid_query(
+                    "sort key path must not contain item selectors",
+                ));
+            }
+        }
+        self.sort_keys = keys;
+        Ok(self)
+    }
+
+    pub fn sort_keys(&self) -> &[SortKey] {
+        &self.sort_keys
     }
 }
 

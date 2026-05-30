@@ -12,11 +12,9 @@ use raccoon_service_query::DicomQuery;
 use raccoon_service_query::{
     AttributePath, AttributeValue, MatchingRule, PatientRootQueryRetrieveLevel, Predicate,
     Projection, QueryPaging, QueryRepository, QueryScope, RangeMatching, ResponseValue,
-    SequenceMatching, StudyRootQueryRetrieveLevel,
+    SequenceMatching, SortDirection, SortKey, StudyRootQueryRetrieveLevel,
 };
 use sqlx::SqlitePool;
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
 
 async fn open_repo() -> (SqliteReadRepository, SqlitePool) {
     let repo = SqliteReadRepository::open("sqlite::memory:")
@@ -114,8 +112,6 @@ fn present_text(value: &ResponseValue) -> &str {
         other => panic!("expected Present(Text), got {other:?}"),
     }
 }
-
-// ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[tokio::test]
 async fn study_scope_returns_one_row_per_study_uid() {
@@ -853,4 +849,211 @@ async fn sequence_attribute_in_blob_materialises_as_sequence_value() {
         }
         other => panic!("expected Sequence, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn sort_key_orders_results_by_study_date_descending() {
+    let (repo, pool) = open_repo().await;
+
+    // Insert three studies with different dates and different synced_at so the
+    // default order (newest-synced first) would NOT be date order.
+    for (uid, date, synced_at) in [
+        ("1.2.1", "20260301", 1000i64),
+        ("1.2.2", "20260101", 3000i64), // newest synced → first without sort
+        ("1.2.3", "20260201", 2000i64),
+    ] {
+        sqlx::query(
+            "INSERT OR IGNORE INTO studies \
+             (study_instance_uid, patient_id, study_date, synced_at_unix_ms) \
+             VALUES (?, 'P', ?, ?)",
+        )
+        .bind(uid)
+        .bind(date)
+        .bind(synced_at)
+        .execute(&pool)
+        .await
+        .expect("insert study");
+
+        sqlx::query(
+            "INSERT OR IGNORE INTO series (series_instance_uid, study_instance_uid) VALUES (?, ?)",
+        )
+        .bind(format!("{uid}.1"))
+        .bind(uid)
+        .execute(&pool)
+        .await
+        .expect("insert series");
+
+        let attrs = to_attributes_json(&empty_attrs());
+        sqlx::query(
+            "INSERT OR IGNORE INTO instances \
+             (sop_instance_uid, sop_class_uid, series_instance_uid, study_instance_uid, attributes) \
+             VALUES (?, '1.2.840.10008.5.1.4.1.1.4', ?, ?, ?)",
+        )
+        .bind(format!("{uid}.1.1"))
+        .bind(format!("{uid}.1"))
+        .bind(uid)
+        .bind(attrs)
+        .execute(&pool)
+        .await
+        .expect("insert instance");
+    }
+
+    let query = DicomQuery::new(
+        QueryScope::StudyRoot(StudyRootQueryRetrieveLevel::Study),
+        Projection::Default,
+    )
+    .expect("valid query")
+    .with_sort_keys(vec![SortKey {
+        path: AttributePath::from_tag(tags::STUDY_DATE),
+        direction: SortDirection::Descending,
+    }])
+    .expect("valid sort keys");
+
+    let page = repo.execute(&query).await.expect("execute");
+
+    assert_eq!(page.items.len(), 3);
+    // Expect descending date order: 20260301, 20260201, 20260101
+    let dates: Vec<&str> = page
+        .items
+        .iter()
+        .map(|m| {
+            m.attributes()
+                .iter()
+                .find(|a| a.path == AttributePath::from_tag(tags::STUDY_DATE))
+                .and_then(|a| {
+                    if let ResponseValue::Present(AttributeValue::Text(s)) = &a.value {
+                        Some(s.as_str())
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or("")
+        })
+        .collect();
+    assert_eq!(dates, vec!["20260301", "20260201", "20260101"]);
+}
+
+#[tokio::test]
+async fn fuzzy_matching_finds_phonetically_similar_patient_name() {
+    let (repo, pool) = open_repo().await;
+
+    // "SMITH" and "SMYTH" are phonetically equivalent under SOUNDEX (both → S530).
+    // We store just the family-name component so the SOUNDEX comparison operates
+    // on the same granularity as the query value.  In production the sync process
+    // stores the full DICOM PN value; callers that need family-name matching should
+    // pass only the family-name component as the query value.
+    insert_instance(
+        &pool,
+        "1.2.1",
+        "1.2.1.1",
+        "1.2.1.1.1",
+        "1.2.840.10008.5.1.4.1.1.4",
+        "PAT-001",
+        "SMYTH",
+        "20260101",
+        "CT",
+        None,
+        &empty_attrs(),
+    )
+    .await;
+    // "JONES" → J520, phonetically distinct from "SMITH" → S530.
+    insert_instance(
+        &pool,
+        "1.2.2",
+        "1.2.2.1",
+        "1.2.2.1.1",
+        "1.2.840.10008.5.1.4.1.1.4",
+        "PAT-002",
+        "JONES",
+        "20260101",
+        "CT",
+        None,
+        &empty_attrs(),
+    )
+    .await;
+
+    let query = DicomQuery::new(
+        QueryScope::StudyRoot(StudyRootQueryRetrieveLevel::Study),
+        Projection::Default,
+    )
+    .expect("valid query")
+    .with_fuzzy_matching()
+    .with_predicate(Predicate::Attribute(
+        AttributePath::from_tag(tags::PATIENT_NAME),
+        MatchingRule::SingleValue("SMITH".to_string()),
+    ))
+    .expect("valid predicate");
+
+    let page = repo.execute(&query).await.expect("execute");
+
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(
+        present_text(find_attr(&page, 0, tags::PATIENT_NAME).unwrap()),
+        "SMYTH"
+    );
+}
+
+#[tokio::test]
+async fn timezone_adjustment_shifts_dt_range_for_acquisition_time() {
+    let (repo, pool) = open_repo().await;
+
+    // Store two instances.  We store acquisition_date_time in UTC (no offset).
+    // Instance A: acquired at UTC 20260101 020000 (= local midnight UTC+0200).
+    // Instance B: acquired at UTC 20260101 120000 (= local noon UTC+0200).
+    for (uid, acq_dt, idx) in [
+        ("1.2.1.1.1", "20260101020000", 1i64),
+        ("1.2.1.1.2", "20260101120000", 2i64),
+    ] {
+        sqlx::query(
+            "INSERT OR IGNORE INTO studies \
+             (study_instance_uid, patient_id, synced_at_unix_ms) VALUES ('1.2.1', 'P', 0)",
+        )
+        .execute(&pool)
+        .await
+        .expect("study");
+        sqlx::query(
+            "INSERT OR IGNORE INTO series \
+             (series_instance_uid, study_instance_uid) VALUES ('1.2.1.1', '1.2.1')",
+        )
+        .execute(&pool)
+        .await
+        .expect("series");
+        sqlx::query(
+            "INSERT OR REPLACE INTO instances \
+             (sop_instance_uid, sop_class_uid, series_instance_uid, study_instance_uid, \
+              instance_number, acquisition_date_time, attributes) \
+             VALUES (?, '1.2.840.10008.5.1.4.1.1.4', '1.2.1.1', '1.2.1', ?, ?, '{}')",
+        )
+        .bind(uid)
+        .bind(idx)
+        .bind(acq_dt)
+        .execute(&pool)
+        .await
+        .expect("instance");
+    }
+
+    // SCU is at UTC+0200 and queries for instances acquired after 06:00 local
+    // time (= 04:00 UTC).  Only the 12:00 UTC instance should match.
+    let query = DicomQuery::new(
+        QueryScope::StudyRoot(StudyRootQueryRetrieveLevel::Image),
+        Projection::Default,
+    )
+    .expect("valid query")
+    .with_timezone_offset("+0200")
+    .expect("valid offset")
+    .with_predicate(Predicate::Attribute(
+        AttributePath::from_tag(tags::ACQUISITION_DATE_TIME),
+        // SCU says "after 06:00 in my +0200 timezone"
+        MatchingRule::DateTimeRange(RangeMatching::from_start("20260101060000")),
+    ))
+    .expect("valid predicate");
+
+    let page = repo.execute(&query).await.expect("execute");
+
+    // Only the 12:00 UTC instance (06:00+0200 == 04:00 UTC < 12:00 UTC) matches.
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(
+        present_text(find_attr(&page, 0, tags::SOP_INSTANCE_UID).unwrap()),
+        "1.2.1.1.2"
+    );
 }
