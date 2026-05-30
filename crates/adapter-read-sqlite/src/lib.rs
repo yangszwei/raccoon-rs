@@ -1,8 +1,8 @@
 //! SQLite adapter for the CQRS read-side DICOM repository.
 //!
 //! [`SqliteReadRepository`] implements [`QueryRepository`] from
-//! `raccoon-service-query` (and, once designed, `RetrieveRepository` from
-//! `raccoon-service-retrieve`). It hosts all read-side repository trait
+//! `raccoon-service-query` and [`RetrieveRepository`] from
+//! `raccoon-service-retrieve`. It hosts all read-side repository trait
 //! implementations for SQLite, keeping the CQRS read-database concern in one
 //! crate regardless of how many services consume it.
 //!

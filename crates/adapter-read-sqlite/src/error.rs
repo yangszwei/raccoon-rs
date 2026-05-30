@@ -1,4 +1,5 @@
 use raccoon_service_query::QueryRepositoryError;
+use raccoon_service_retrieve::RetrieveRepositoryError;
 use thiserror::Error;
 
 /// Errors produced by [`crate::SqliteReadRepository`].
@@ -19,6 +20,9 @@ pub enum SqliteReadRepositoryError {
     #[error("invalid predicate: {0}")]
     InvalidPredicate(String),
 
+    #[error("invalid stored retrieve metadata in column '{column}': {reason}")]
+    InvalidStoredRetrieveMetadata { column: String, reason: String },
+
     #[error("internal error: {0}")]
     InternalError(String),
 }
@@ -26,5 +30,12 @@ pub enum SqliteReadRepositoryError {
 impl From<SqliteReadRepositoryError> for QueryRepositoryError {
     fn from(err: SqliteReadRepositoryError) -> Self {
         QueryRepositoryError::new(err.to_string())
+    }
+}
+
+impl From<SqliteReadRepositoryError> for RetrieveRepositoryError {
+    fn from(err: SqliteReadRepositoryError) -> Self {
+        let message = err.to_string();
+        RetrieveRepositoryError::with_source(message, err)
     }
 }

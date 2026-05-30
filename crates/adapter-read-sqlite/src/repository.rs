@@ -1,9 +1,14 @@
 use std::str::FromStr;
 
 use async_trait::async_trait;
+use raccoon_contract_dicom::{
+    DicomInstanceIdentity, PatientId, SeriesInstanceUid, SopInstanceUid, StudyInstanceUid,
+};
+use raccoon_contract_object_store::ObjectKey;
 use raccoon_service_query::{DicomQuery, QueryPage, QueryRepository, QueryRepositoryError};
+use raccoon_service_retrieve::{InstanceRef, RetrieveRepository, RetrieveRepositoryError};
 use sqlx::{
-    SqlitePool,
+    Row, SqlitePool,
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous},
 };
 use tracing::{Span, instrument};
@@ -117,6 +122,213 @@ impl QueryRepository for SqliteReadRepository {
             Span::current().record("error.type", "materialize");
             QueryRepositoryError::new(e.to_string())
         })
+    }
+}
+
+#[async_trait]
+impl RetrieveRepository for SqliteReadRepository {
+    #[instrument(
+        skip_all,
+        fields(
+            db.system = "sqlite",
+            retrieve.scope = "patient",
+            error.type = tracing::field::Empty,
+        )
+    )]
+    async fn find_instances_for_patient(
+        &self,
+        patient_id: &PatientId,
+    ) -> Result<Vec<InstanceRef>, RetrieveRepositoryError> {
+        self.fetch_instance_refs(
+            "SELECT i.study_instance_uid, i.series_instance_uid, i.sop_instance_uid, \
+                    i.sop_class_uid, i.transfer_syntax_uid, i.object_key, i.object_size_bytes \
+             FROM instances i \
+             INNER JOIN studies st ON st.study_instance_uid = i.study_instance_uid \
+             WHERE st.patient_id = ? AND i.object_key IS NOT NULL \
+             ORDER BY i.study_instance_uid, i.series_instance_uid, i.sop_instance_uid",
+            patient_id.as_str(),
+        )
+        .await
+    }
+
+    #[instrument(
+        skip_all,
+        fields(
+            db.system = "sqlite",
+            retrieve.scope = "study",
+            error.type = tracing::field::Empty,
+        )
+    )]
+    async fn find_instances_for_study(
+        &self,
+        uid: &StudyInstanceUid,
+    ) -> Result<Vec<InstanceRef>, RetrieveRepositoryError> {
+        self.fetch_instance_refs(
+            "SELECT study_instance_uid, series_instance_uid, sop_instance_uid, sop_class_uid, \
+                    transfer_syntax_uid, object_key, object_size_bytes \
+             FROM instances \
+             WHERE study_instance_uid = ? AND object_key IS NOT NULL \
+             ORDER BY series_instance_uid, sop_instance_uid",
+            uid.as_str(),
+        )
+        .await
+    }
+
+    #[instrument(
+        skip_all,
+        fields(
+            db.system = "sqlite",
+            retrieve.scope = "series",
+            error.type = tracing::field::Empty,
+        )
+    )]
+    async fn find_instances_for_series(
+        &self,
+        uid: &SeriesInstanceUid,
+    ) -> Result<Vec<InstanceRef>, RetrieveRepositoryError> {
+        self.fetch_instance_refs(
+            "SELECT study_instance_uid, series_instance_uid, sop_instance_uid, sop_class_uid, \
+                    transfer_syntax_uid, object_key, object_size_bytes \
+             FROM instances \
+             WHERE series_instance_uid = ? AND object_key IS NOT NULL \
+             ORDER BY sop_instance_uid",
+            uid.as_str(),
+        )
+        .await
+    }
+
+    #[instrument(
+        skip_all,
+        fields(
+            db.system = "sqlite",
+            retrieve.scope = "instance",
+            error.type = tracing::field::Empty,
+        )
+    )]
+    async fn find_instance(
+        &self,
+        uid: &SopInstanceUid,
+    ) -> Result<Option<InstanceRef>, RetrieveRepositoryError> {
+        let row = sqlx::query(
+            "SELECT study_instance_uid, series_instance_uid, sop_instance_uid, sop_class_uid, \
+                    transfer_syntax_uid, object_key, object_size_bytes \
+             FROM instances \
+             WHERE sop_instance_uid = ? AND object_key IS NOT NULL",
+        )
+        .bind(uid.as_str())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(retrieve_query_error)?;
+
+        row.map(materialize_instance_ref)
+            .transpose()
+            .map_err(Into::into)
+    }
+}
+
+impl SqliteReadRepository {
+    async fn fetch_instance_refs(
+        &self,
+        sql: &'static str,
+        bind: &str,
+    ) -> Result<Vec<InstanceRef>, RetrieveRepositoryError> {
+        let rows = sqlx::query(sql)
+            .bind(bind)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(retrieve_query_error)?;
+
+        rows.into_iter()
+            .map(materialize_instance_ref)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+}
+
+fn retrieve_query_error(err: sqlx::Error) -> RetrieveRepositoryError {
+    Span::current().record("error.type", "sqlx");
+    SqliteReadRepositoryError::Query(err).into()
+}
+
+fn materialize_instance_ref(
+    row: sqlx::sqlite::SqliteRow,
+) -> Result<InstanceRef, SqliteReadRepositoryError> {
+    let identity = DicomInstanceIdentity::new(
+        parse_uid(&row, "study_instance_uid")?,
+        parse_uid(&row, "series_instance_uid")?,
+        parse_uid(&row, "sop_instance_uid")?,
+        parse_uid(&row, "sop_class_uid")?,
+    );
+    let object_key = parse_object_key(&row, "object_key")?;
+    let transfer_syntax_uid = parse_optional_uid(&row, "transfer_syntax_uid")?;
+    let content_length = parse_content_length(&row, "object_size_bytes")?;
+
+    Ok(InstanceRef {
+        identity,
+        transfer_syntax_uid,
+        object_key,
+        content_length,
+    })
+}
+
+fn parse_uid<T>(row: &sqlx::sqlite::SqliteRow, column: &str) -> Result<T, SqliteReadRepositoryError>
+where
+    T: FromStr,
+    T::Err: std::fmt::Display,
+{
+    let value = row
+        .try_get::<String, _>(column)
+        .map_err(|e| SqliteReadRepositoryError::RowRead(column.to_owned(), e))?;
+
+    value.parse::<T>().map_err(|e| invalid_metadata(column, e))
+}
+
+fn parse_optional_uid<T>(
+    row: &sqlx::sqlite::SqliteRow,
+    column: &str,
+) -> Result<Option<T>, SqliteReadRepositoryError>
+where
+    T: FromStr,
+    T::Err: std::fmt::Display,
+{
+    row.try_get::<Option<String>, _>(column)
+        .map_err(|e| SqliteReadRepositoryError::RowRead(column.to_owned(), e))?
+        .map(|value| value.parse::<T>().map_err(|e| invalid_metadata(column, e)))
+        .transpose()
+}
+
+fn parse_object_key(
+    row: &sqlx::sqlite::SqliteRow,
+    column: &str,
+) -> Result<ObjectKey, SqliteReadRepositoryError> {
+    let value = row
+        .try_get::<String, _>(column)
+        .map_err(|e| SqliteReadRepositoryError::RowRead(column.to_owned(), e))?;
+
+    ObjectKey::new(value).map_err(|e| invalid_metadata(column, e))
+}
+
+fn parse_content_length(
+    row: &sqlx::sqlite::SqliteRow,
+    column: &str,
+) -> Result<Option<u64>, SqliteReadRepositoryError> {
+    row.try_get::<Option<i64>, _>(column)
+        .map_err(|e| SqliteReadRepositoryError::RowRead(column.to_owned(), e))?
+        .map(|value| {
+            u64::try_from(value).map_err(|_| {
+                SqliteReadRepositoryError::InvalidStoredRetrieveMetadata {
+                    column: column.to_owned(),
+                    reason: "must not be negative".to_owned(),
+                }
+            })
+        })
+        .transpose()
+}
+
+fn invalid_metadata(column: &str, err: impl std::fmt::Display) -> SqliteReadRepositoryError {
+    SqliteReadRepositoryError::InvalidStoredRetrieveMetadata {
+        column: column.to_owned(),
+        reason: err.to_string(),
     }
 }
 
