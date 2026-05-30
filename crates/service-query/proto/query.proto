@@ -1,0 +1,258 @@
+syntax = "proto3";
+
+package raccoon.query.v1;
+
+
+// Protocol-neutral DICOM Query/Retrieve service.
+//
+// The service name is DicomQueryService (not QueryService) to avoid a naming
+// collision with the Rust domain trait raccoon_service_query::QueryService.
+service DicomQueryService {
+  // Execute a DICOM Query/Retrieve C-FIND–equivalent query.
+  rpc Query(QueryRequest) returns (QueryResponse);
+}
+
+
+// Protocol-neutral DICOM query request (maps to DicomQuery).
+message QueryRequest {
+  // Which DICOM information model and level this query targets.
+  QueryScope scope = 1;
+
+  // Optional filter predicate tree.
+  optional Predicate predicate = 2;
+
+  // Which attributes to include in each result row.
+  Projection projection = 3;
+
+  // Optional paging parameters.
+  optional QueryPaging paging = 4;
+
+  // Whether fuzzy semantic matching applies to all PN attributes
+  // (QIDO-RS fuzzymatching=true, PS3.18 §8.3.4.2).
+  bool fuzzy_matching = 5;
+
+  // Timezone Offset From UTC (0008,0201) in +HHMM / -HHMM form.
+  // Present when the request identifier carried this attribute.
+  optional string timezone_offset_from_utc = 6;
+
+  // Specific Character Set (0008,0005) values from the request identifier.
+  // Present when the SCU declared a non-default character set.
+  optional SpecificCharacterSet specific_character_set = 7;
+
+  // Query/Retrieve View (0008,0053) when Enhanced Multi-Frame Image
+  // Conversion is negotiated.
+  optional QueryRetrieveView query_retrieve_view = 8;
+
+  // Whether extended relational negotiation is active.
+  bool relational_query = 9;
+}
+
+// Which DICOM information model and level a query targets.
+message QueryScope {
+  oneof scope {
+    PatientRootLevel patient_root = 1;
+    StudyRootLevel study_root = 2;
+  }
+}
+
+// Query/Retrieve levels for the Patient Root Information Model.
+enum PatientRootLevel {
+  PATIENT_ROOT_LEVEL_UNSPECIFIED = 0;
+  PATIENT_ROOT_LEVEL_PATIENT = 1;
+  PATIENT_ROOT_LEVEL_STUDY = 2;
+  PATIENT_ROOT_LEVEL_SERIES = 3;
+  PATIENT_ROOT_LEVEL_IMAGE = 4;
+}
+
+// Query/Retrieve levels for the Study Root Information Model.
+enum StudyRootLevel {
+  STUDY_ROOT_LEVEL_UNSPECIFIED = 0;
+  STUDY_ROOT_LEVEL_STUDY = 1;
+  STUDY_ROOT_LEVEL_SERIES = 2;
+  STUDY_ROOT_LEVEL_IMAGE = 3;
+}
+
+// Paging parameters.
+message QueryPaging {
+  uint64 offset = 1;
+  uint64 limit = 2;
+}
+
+// Projection: which attributes to return for each match.
+message Projection {
+  oneof projection {
+    // Specific attribute list (QIDO-RS includefield=tag,...).
+    FieldsProjection fields = 1;
+    // All stored attributes (QIDO-RS includefield=all).
+    AllProjection all = 2;
+    // Mandatory attributes for the query level (no includefield).
+    DefaultProjection default = 3;
+  }
+}
+
+message FieldsProjection {
+  repeated AttributePath paths = 1;
+}
+
+message AllProjection {}
+
+message DefaultProjection {}
+
+
+// A filter predicate over DICOM attribute trees.
+message Predicate {
+  oneof predicate {
+    AllPredicate all = 1;
+    AttributePredicate attribute = 2;
+  }
+}
+
+// Conjunction: all inner predicates must hold.
+message AllPredicate {
+  repeated Predicate items = 1;
+}
+
+// A matching rule applied to a specific attribute path.
+message AttributePredicate {
+  AttributePath path = 1;
+  MatchingRule rule = 2;
+}
+
+// A path into a DICOM attribute tree (supports nested sequence navigation).
+message AttributePath {
+  repeated AttributePathSegment segments = 1;
+}
+
+// One segment of an attribute path.
+message AttributePathSegment {
+  oneof segment {
+    // DICOM tag encoded as (group << 16) | element.
+    uint32 tag = 1;
+    // Any sequence item ([*]).
+    AnyItem any_item = 2;
+  }
+}
+
+message AnyItem {}
+
+// A DICOM PS3.4 C-FIND matching rule.
+message MatchingRule {
+  oneof rule {
+    // Exact value match.
+    string single_value = 1;
+    // Zero-length: match all (universal matching).
+    Universal universal = 2;
+    // Wildcard match (* / ?); string VRs only.
+    string wildcard = 3;
+    // DA or TM range match.
+    RangeValue range = 4;
+    // DT (datetime) range match.
+    RangeValue datetime_range = 5;
+    // OR match across a list of UIDs (UI VR only).
+    UidList uid_list = 6;
+    // AND match: each listed value must appear in the attribute (extended negotiation).
+    MultipleValues multiple_values = 7;
+    // Match absent or zero-length attributes (extended negotiation).
+    EmptyValue empty_value = 8;
+    // Sequence matching: predicate applied to any item.
+    SequenceRule sequence = 9;
+  }
+}
+
+message Universal {}
+
+message EmptyValue {}
+
+// Lower and/or upper bound for range matching.
+// At least one bound must be present.
+message RangeValue {
+  optional string start = 1;
+  optional string end = 2;
+}
+
+message UidList {
+  repeated string uids = 1;
+}
+
+message MultipleValues {
+  repeated string values = 1;
+}
+
+// Sequence matching: inner predicate applied to any item of the stored SQ.
+message SequenceRule {
+  Predicate predicate = 1;
+}
+
+// Specific Character Set (0008,0005) wrapper.
+// Presence of this message signals that the field was explicitly set;
+// an absent message means no SpecificCharacterSet was declared.
+message SpecificCharacterSet {
+  repeated string values = 1;
+}
+
+// Which instance view applies when Enhanced Multi-Frame Image Conversion
+// is negotiated (0008,0053).
+enum QueryRetrieveView {
+  QUERY_RETRIEVE_VIEW_UNSPECIFIED = 0;
+  QUERY_RETRIEVE_VIEW_CLASSIC = 1;
+  QUERY_RETRIEVE_VIEW_ENHANCED = 2;
+}
+
+
+// A page of query results (maps to QueryPage).
+message QueryResponse {
+  repeated QueryMatch items = 1;
+  uint64 offset = 2;
+  uint64 limit = 3;
+  // Total matching rows, when the repository supports counting.
+  optional uint64 total = 4;
+}
+
+// One result row (maps to QueryMatch).
+message QueryMatch {
+  repeated ProjectedAttribute attributes = 1;
+}
+
+// A single projected attribute within a result row.
+message ProjectedAttribute {
+  AttributePath path = 1;
+  ResponseValue value = 2;
+}
+
+// The three possible states of a projected attribute in a DICOM C-FIND response.
+message ResponseValue {
+  oneof value {
+    // Attribute is present with a value.
+    AttributeValue present = 1;
+    // Attribute is supported but has no stored value (zero-length on wire).
+    ZeroLength zero_length = 2;
+    // Attribute is not supported; omit from the response entirely.
+    Absent absent = 3;
+  }
+}
+
+message ZeroLength {}
+
+message Absent {}
+
+// A DICOM attribute value (all strings are Unicode / UTF-8).
+message AttributeValue {
+  oneof value {
+    // Single string value.
+    string text = 1;
+    // Multi-valued string attribute (VM > 1).
+    TextList texts = 2;
+    // Sequence attribute; each item is a nested set of projected attributes.
+    SequenceValue sequence = 3;
+    // Raw bytes for binary VRs (OB, OW, UN, etc.).
+    bytes binary = 4;
+  }
+}
+
+message TextList {
+  repeated string values = 1;
+}
+
+message SequenceValue {
+  repeated QueryMatch items = 1;
+}

@@ -9,6 +9,8 @@
 
 mod error;
 mod filter;
+#[cfg(feature = "grpc")]
+mod grpc;
 mod query;
 mod repository;
 mod service;
@@ -17,6 +19,11 @@ pub use error::{QueryError, QueryRepositoryError};
 pub use filter::{
     AttributePath, AttributePathError, AttributePathSegment, MatchingRule, Predicate,
     PredicateError, RangeMatching, SequenceMatching,
+};
+#[cfg(feature = "grpc")]
+pub use grpc::{
+    DicomQueryService, DicomQueryServiceClient, DicomQueryServiceServer, GrpcQueryServiceClient,
+    QueryGrpcService,
 };
 pub use query::{
     AttributeValue, DicomQuery, ProjectedAttribute, Projection, QueryMatch, QueryPage, QueryPaging,

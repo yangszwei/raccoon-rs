@@ -2113,9 +2113,17 @@ dependencies = [
  "async-trait",
  "dicom-core",
  "dicom-dictionary-std",
+ "opentelemetry",
+ "prost",
+ "protoc-bin-vendored",
  "raccoon-contract-dicom",
  "thiserror",
  "tokio",
+ "tonic",
+ "tonic-prost",
+ "tonic-prost-build",
+ "tracing",
+ "tracing-opentelemetry",
 ]
 
 [[package]]
