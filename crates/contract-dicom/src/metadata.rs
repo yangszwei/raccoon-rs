@@ -1,4 +1,78 @@
+use std::fmt;
+use std::str::FromStr;
+
+use thiserror::Error;
+
 use crate::uid::TransferSyntaxUid;
+
+/// Validation error for a [`PatientId`] construction attempt.
+#[derive(Clone, Debug, Eq, Error, PartialEq)]
+pub enum PatientIdError {
+    /// The value was empty or contained only whitespace.
+    #[error("patient ID must not be blank")]
+    Blank,
+}
+
+/// A validated, normalized DICOM Patient ID (tag 0010,0020).
+///
+/// The raw value is trimmed of leading/trailing ASCII whitespace on
+/// construction, matching the normalization that [`DicomPatient`] applies
+/// to ingest-time data. Blank values (empty or all-whitespace) are rejected.
+///
+/// No other format constraints are applied because the LO value representation
+/// (PS3.5 Section 6.2) has no structured syntax — patient IDs are free-form,
+/// system-assigned strings.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct PatientId(String);
+
+impl PatientId {
+    /// Creates a validated, normalized Patient ID.
+    ///
+    /// Trims leading and trailing ASCII whitespace. Returns
+    /// [`PatientIdError::Blank`] if the result is empty.
+    pub fn new(value: impl Into<String>) -> Result<Self, PatientIdError> {
+        let raw = value.into();
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return Err(PatientIdError::Blank);
+        }
+        if trimmed.len() == raw.len() {
+            Ok(Self(raw))
+        } else {
+            Ok(Self(trimmed.to_owned()))
+        }
+    }
+
+    /// Returns the Patient ID as a string slice.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Consumes the Patient ID into its string representation.
+    pub fn into_string(self) -> String {
+        self.0
+    }
+}
+
+impl fmt::Display for PatientId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl AsRef<str> for PatientId {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl FromStr for PatientId {
+    type Err = PatientIdError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::new(s)
+    }
+}
 
 /// Normalizes an optional string by trimming ASCII whitespace and mapping
 /// blank strings to [`None`].
@@ -137,6 +211,56 @@ impl DicomInstanceMetadata {
 mod tests {
     use super::*;
     use crate::uid::TransferSyntaxUid;
+
+    #[test]
+    fn patient_id_trims_whitespace() {
+        let id = PatientId::new("  PAT-001  ").unwrap();
+        assert_eq!(id.as_str(), "PAT-001");
+        assert_eq!(id.to_string(), "PAT-001");
+    }
+
+    #[test]
+    fn patient_id_rejects_blank() {
+        for value in ["", "  ", "\t", " \t "] {
+            assert!(
+                PatientId::new(value).is_err(),
+                "expected rejection for {value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn patient_id_accepts_non_blank() {
+        assert!(PatientId::new("PAT-001").is_ok());
+        assert!(PatientId::new(" PAT-001 ").is_ok());
+    }
+
+    #[test]
+    fn patient_id_as_ref_returns_trimmed_value() {
+        let id = PatientId::new("  X  ").unwrap();
+        let s: &str = id.as_ref();
+        assert_eq!(s, "X");
+    }
+
+    #[test]
+    fn patient_id_parse_round_trips() {
+        let id: PatientId = "PAT-001".parse().unwrap();
+        assert_eq!(id.as_str(), "PAT-001");
+    }
+
+    #[test]
+    fn patient_id_parse_rejects_blank() {
+        assert!("".parse::<PatientId>().is_err());
+        assert!("  ".parse::<PatientId>().is_err());
+    }
+
+    #[test]
+    fn patient_id_new_avoids_allocation_when_no_trimming_needed() {
+        let id = PatientId::new("PAT-001").unwrap();
+        assert_eq!(id.as_str(), "PAT-001");
+        let id_trimmed = PatientId::new("  PAT-001  ").unwrap();
+        assert_eq!(id_trimmed.as_str(), "PAT-001");
+    }
 
     #[test]
     fn patient_trims_whitespace_from_fields() {

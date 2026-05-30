@@ -14,7 +14,10 @@ mod uid;
 
 pub use identity::{DicomInstanceIdentity, DicomSeriesIdentity, DicomStudyIdentity};
 pub use level::{PatientRootQueryRetrieveLevel, StudyRootQueryRetrieveLevel};
-pub use metadata::{DicomInstanceMetadata, DicomPatient, DicomSeriesMetadata, DicomStudyMetadata};
+pub use metadata::{
+    DicomInstanceMetadata, DicomPatient, DicomSeriesMetadata, DicomStudyMetadata, PatientId,
+    PatientIdError,
+};
 pub use uid::{
     DicomUidError, SeriesInstanceUid, SopClassUid, SopInstanceUid, StudyInstanceUid,
     TransferSyntaxUid,

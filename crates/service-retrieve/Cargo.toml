@@ -1,0 +1,15 @@
+[package]
+name = "raccoon-service-retrieve"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+async-trait = "0.1.89"
+futures-util = "0.3.32"
+raccoon-contract-dicom = { path = "../contract-dicom" }
+raccoon-contract-object-store = { path = "../contract-object-store" }
+thiserror = "2.0.18"
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { version = "1.52.3", features = ["macros", "rt"] }
