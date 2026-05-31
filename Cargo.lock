@@ -2048,6 +2048,7 @@ version = "0.1.0"
 dependencies = [
  "raccoon-adapter-ingest-repository-sqlite",
  "raccoon-adapter-object-store-filesystem",
+ "raccoon-adapter-read-sqlite",
  "raccoon-contract-object-store",
  "raccoon-platform-config",
  "raccoon-platform-runtime",
@@ -2055,6 +2056,9 @@ dependencies = [
  "raccoon-protocol-dimse",
  "raccoon-service-application-entity-registry",
  "raccoon-service-ingest",
+ "raccoon-service-query",
+ "raccoon-service-retrieve",
+ "raccoon-service-sync",
  "thiserror",
  "tokio",
  "tonic",

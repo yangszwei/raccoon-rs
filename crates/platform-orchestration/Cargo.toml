@@ -14,6 +14,7 @@ grpc = [
 [dependencies]
 raccoon-adapter-ingest-repository-sqlite = { path = "../adapter-ingest-repository-sqlite" }
 raccoon-adapter-object-store-filesystem = { path = "../adapter-object-store-filesystem" }
+raccoon-adapter-read-sqlite = { path = "../adapter-read-sqlite" }
 raccoon-contract-object-store = { path = "../contract-object-store" }
 raccoon-platform-config = { path = "../platform-config" }
 raccoon-platform-runtime = { path = "../platform-runtime" }
@@ -21,6 +22,9 @@ raccoon-platform-telemetry = { path = "../platform-telemetry" }
 raccoon-protocol-dimse = { path = "../protocol-dimse" }
 raccoon-service-application-entity-registry = { path = "../service-application-entity-registry" }
 raccoon-service-ingest = { path = "../service-ingest" }
+raccoon-service-query = { path = "../service-query" }
+raccoon-service-retrieve = { path = "../service-retrieve" }
+raccoon-service-sync = { path = "../service-sync" }
 thiserror = "2.0.18"
 tokio = { version = "1.52.1", features = ["signal"] }
 tonic = { version = "0.14.6", optional = true }

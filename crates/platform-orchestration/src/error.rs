@@ -19,6 +19,10 @@ pub enum OrchestrationError {
         #[from] raccoon_adapter_ingest_repository_sqlite::SqliteIngestRepositoryError,
     ),
 
+    /// SQLite read repository could not be opened or migrated.
+    #[error(transparent)]
+    SqliteReadRepository(#[from] raccoon_adapter_read_sqlite::SqliteReadRepositoryError),
+
     /// Configured network address could not be parsed.
     #[cfg(feature = "grpc")]
     #[error(transparent)]
