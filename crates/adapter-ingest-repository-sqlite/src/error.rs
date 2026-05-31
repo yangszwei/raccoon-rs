@@ -28,6 +28,15 @@ pub(crate) enum SqliteError {
 
     #[error("{field} Unix epoch milliseconds are outside SQLite INTEGER range")]
     TimeOutOfRange { field: &'static str },
+
+    #[error("{field} duration milliseconds are outside SQLite INTEGER range")]
+    DurationOutOfRange { field: &'static str },
+
+    #[error("invalid stored sync metadata in column '{column}': {reason}")]
+    InvalidStoredSyncMetadata { column: String, reason: String },
+
+    #[error("sync claim token no longer owns a pending object")]
+    StaleSyncClaim,
 }
 
 /// Returns the `error.type` attribute value for the given internal error.
@@ -46,5 +55,12 @@ pub(crate) fn error_kind(err: &SqliteError) -> &'static str {
         SqliteError::TimeOutOfRange { .. } => {
             "raccoon_adapter_ingest_repository_sqlite::TimeOutOfRange"
         }
+        SqliteError::DurationOutOfRange { .. } => {
+            "raccoon_adapter_ingest_repository_sqlite::DurationOutOfRange"
+        }
+        SqliteError::InvalidStoredSyncMetadata { .. } => {
+            "raccoon_adapter_ingest_repository_sqlite::InvalidStoredSyncMetadata"
+        }
+        SqliteError::StaleSyncClaim => "raccoon_adapter_ingest_repository_sqlite::StaleSyncClaim",
     }
 }

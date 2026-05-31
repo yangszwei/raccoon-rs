@@ -15,7 +15,7 @@ raccoon-contract-object-store = { path = "../contract-object-store" }
 raccoon-service-ingest = { path = "../service-ingest" }
 serde_json = "1.0"
 thiserror = "2.0.18"
-tokio = { version = "1.52.3", features = ["rt", "time"] }
+tokio = { version = "1.52.3", features = ["macros", "rt", "time"] }
 tokio-util = "0.7.17"
 tracing.workspace = true
 

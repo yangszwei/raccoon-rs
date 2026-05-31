@@ -1,12 +1,18 @@
 use std::str::FromStr;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
+use raccoon_contract_object_store::ObjectKey;
 use raccoon_service_ingest::{
-    IngestObjectOutcome, IngestRepository, IngestRepositoryError, ReceivedIngestObject,
+    IngestObjectId, IngestObjectOutcome, IngestRepository, IngestRepositoryError,
+    ReceivedIngestObject,
+};
+use raccoon_service_sync::{
+    ClaimedSyncObject, QuarantineRecord, SyncClaimToken, SyncQuarantineRepository,
+    SyncRepositoryError, SyncSourceRepository, SyncWorkerId,
 };
 use sqlx::{
-    SqlitePool,
+    Row, SqlitePool,
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous},
 };
 use tracing::{Span, instrument};
@@ -103,6 +109,80 @@ impl IngestRepository for SqliteIngestRepository {
     }
 }
 
+#[async_trait]
+impl SyncSourceRepository for SqliteIngestRepository {
+    #[instrument(
+        skip_all,
+        fields(
+            sync.worker_id = %worker_id,
+            sync.batch_size = batch_size,
+            db.system = "sqlite",
+            error.type = tracing::field::Empty,
+        )
+    )]
+    async fn claim_pending_objects(
+        &self,
+        worker_id: &SyncWorkerId,
+        batch_size: usize,
+        claim_ttl: Duration,
+    ) -> Result<Vec<ClaimedSyncObject>, SyncRepositoryError> {
+        self.try_claim_pending_objects(worker_id, batch_size, claim_ttl)
+            .await
+            .map_err(sync_repository_error(
+                "failed to claim pending sync objects",
+            ))
+    }
+
+    #[instrument(
+        skip_all,
+        fields(
+            sync.claim_token = %claim_token,
+            db.system = "sqlite",
+            error.type = tracing::field::Empty,
+        )
+    )]
+    async fn mark_synced(&self, claim_token: &SyncClaimToken) -> Result<(), SyncRepositoryError> {
+        self.try_mark_synced(claim_token)
+            .await
+            .map_err(sync_repository_error("failed to mark sync claim as synced"))
+    }
+
+    #[instrument(
+        skip_all,
+        fields(
+            sync.claim_token = %claim_token,
+            db.system = "sqlite",
+            error.type = tracing::field::Empty,
+        )
+    )]
+    async fn release_claim(&self, claim_token: &SyncClaimToken) -> Result<(), SyncRepositoryError> {
+        self.try_release_claim(claim_token)
+            .await
+            .map_err(sync_repository_error("failed to release sync claim"))
+    }
+}
+
+#[async_trait]
+impl SyncQuarantineRepository for SqliteIngestRepository {
+    #[instrument(
+        skip_all,
+        fields(
+            sync.ingest_object_id = %record.ingest_object_id,
+            sync.claim_token = %record.claim_token,
+            sync.quarantine_category = record.category.as_str(),
+            db.system = "sqlite",
+            error.type = tracing::field::Empty,
+        )
+    )]
+    async fn mark_quarantined(&self, record: &QuarantineRecord) -> Result<(), SyncRepositoryError> {
+        self.try_mark_quarantined(record)
+            .await
+            .map_err(sync_repository_error(
+                "failed to mark sync claim as quarantined",
+            ))
+    }
+}
+
 impl SqliteIngestRepository {
     async fn try_record_received_objects(
         &self,
@@ -115,6 +195,263 @@ impl SqliteIngestRepository {
         }
 
         tx.commit().await.map_err(SqliteError::Sqlx)
+    }
+
+    async fn try_claim_pending_objects(
+        &self,
+        worker_id: &SyncWorkerId,
+        batch_size: usize,
+        claim_ttl: Duration,
+    ) -> Result<Vec<ClaimedSyncObject>, SqliteError> {
+        let now_ms = current_unix_ms()?;
+        let ttl_ms = duration_to_i64("claim_ttl", claim_ttl)?;
+        let expires_at = now_ms
+            .checked_add(ttl_ms)
+            .ok_or(SqliteError::TimeOutOfRange {
+                field: "sync_claim_expires_at",
+            })?;
+        let limit = usize_to_i64("batch_size", batch_size)?;
+
+        let claimed_rows = sqlx::query(
+            r#"
+            INSERT INTO ingest_object_sync_states (
+                ingest_object_id,
+                sync_state,
+                sync_claim_token,
+                sync_claimed_by,
+                sync_claim_expires_at_unix_ms
+            )
+            SELECT
+                ingest_objects.ingest_object_id,
+                'pending',
+                lower(hex(randomblob(16))),
+                ?,
+                ?
+            FROM ingest_objects
+            LEFT JOIN ingest_object_sync_states
+                ON ingest_object_sync_states.ingest_object_id = ingest_objects.ingest_object_id
+            WHERE ingest_objects.outcome_kind = 'stored'
+              AND (
+                  ingest_object_sync_states.ingest_object_id IS NULL
+                  OR (
+                      ingest_object_sync_states.sync_state = 'pending'
+                      AND (
+                      ingest_object_sync_states.sync_claim_token IS NULL
+                      OR ingest_object_sync_states.sync_claim_expires_at_unix_ms IS NULL
+                      OR ingest_object_sync_states.sync_claim_expires_at_unix_ms <= ?
+                      )
+                  )
+              )
+            ORDER BY ingest_objects.received_at_unix_ms, ingest_objects.ingest_object_id
+            LIMIT ?
+            ON CONFLICT(ingest_object_id) DO UPDATE SET
+                sync_claim_token = excluded.sync_claim_token,
+                sync_claimed_by = excluded.sync_claimed_by,
+                sync_claim_expires_at_unix_ms = excluded.sync_claim_expires_at_unix_ms
+            WHERE ingest_object_sync_states.sync_state = 'pending'
+              AND (
+                  ingest_object_sync_states.sync_claim_token IS NULL
+                  OR ingest_object_sync_states.sync_claim_expires_at_unix_ms IS NULL
+                  OR ingest_object_sync_states.sync_claim_expires_at_unix_ms <= ?
+              )
+            RETURNING
+                ingest_object_id,
+                sync_claim_token
+            "#,
+        )
+        .bind(worker_id.as_str())
+        .bind(expires_at)
+        .bind(now_ms)
+        .bind(limit)
+        .bind(now_ms)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(SqliteError::Sqlx)?;
+
+        // Collect (id → token) from the RETURNING rows.
+        let mut token_by_id: std::collections::HashMap<String, SyncClaimToken> =
+            std::collections::HashMap::with_capacity(claimed_rows.len());
+        for row in &claimed_rows {
+            let id = read_string(row, "ingest_object_id")?;
+            let token = SyncClaimToken::new(read_string(row, "sync_claim_token")?);
+            token_by_id.insert(id, token);
+        }
+
+        if token_by_id.is_empty() {
+            return Ok(vec![]);
+        }
+
+        // Single batch fetch for all object metadata.
+        let placeholders = token_by_id
+            .keys()
+            .map(|_| "?")
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT ingest_object_id, object_key, content_length, received_at_unix_ms \
+             FROM ingest_objects WHERE ingest_object_id IN ({placeholders})"
+        );
+        let mut stmt = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()));
+        for id in token_by_id.keys() {
+            stmt = stmt.bind(id);
+        }
+        let metadata_rows = stmt
+            .fetch_all(&self.pool)
+            .await
+            .map_err(SqliteError::Sqlx)?;
+
+        let mut claims: Vec<OrderedClaimedSyncObject> = Vec::with_capacity(metadata_rows.len());
+        for row in metadata_rows {
+            let id_str = read_string(&row, "ingest_object_id")?;
+            let ingest_object_id = id_str
+                .parse::<IngestObjectId>()
+                .map_err(|e| invalid_sync_metadata("ingest_object_id", e))?;
+            let claim_token =
+                token_by_id
+                    .remove(&id_str)
+                    .ok_or(SqliteError::InvalidStoredSyncMetadata {
+                        column: "ingest_object_id".to_owned(),
+                        reason: format!("returned id {id_str} was not in RETURNING set"),
+                    })?;
+            let object_key = parse_object_key(&row, "object_key")?;
+            let content_length = parse_content_length(&row, "content_length")?;
+            let received_at_unix_ms = row
+                .try_get::<i64, _>("received_at_unix_ms")
+                .map_err(SqliteError::Sqlx)?;
+            claims.push(OrderedClaimedSyncObject {
+                received_at_unix_ms,
+                object: ClaimedSyncObject {
+                    ingest_object_id,
+                    object_key,
+                    content_length,
+                    claim_token,
+                },
+            });
+        }
+
+        claims.sort_by(|left, right| {
+            left.received_at_unix_ms
+                .cmp(&right.received_at_unix_ms)
+                .then_with(|| {
+                    left.object
+                        .ingest_object_id
+                        .cmp(&right.object.ingest_object_id)
+                })
+        });
+
+        Ok(claims.into_iter().map(|claim| claim.object).collect())
+    }
+
+    async fn try_mark_synced(&self, claim_token: &SyncClaimToken) -> Result<(), SqliteError> {
+        let synced_at = current_unix_ms()?;
+        let result = sqlx::query(
+            r#"
+            UPDATE ingest_object_sync_states
+            SET
+                sync_state = 'synced',
+                synced_at_unix_ms = ?,
+                terminal_at_unix_ms = ?,
+                sync_claim_token = NULL,
+                sync_claimed_by = NULL,
+                sync_claim_expires_at_unix_ms = NULL
+            WHERE sync_state = 'pending'
+              AND sync_claim_token = ?
+            "#,
+        )
+        .bind(synced_at)
+        .bind(synced_at)
+        .bind(claim_token.as_str())
+        .execute(&self.pool)
+        .await
+        .map_err(SqliteError::Sqlx)?;
+
+        if result.rows_affected() == 0 {
+            return Err(SqliteError::StaleSyncClaim);
+        }
+
+        Ok(())
+    }
+
+    async fn try_release_claim(&self, claim_token: &SyncClaimToken) -> Result<(), SqliteError> {
+        sqlx::query(
+            r#"
+            UPDATE ingest_object_sync_states
+            SET
+                sync_claim_token = NULL,
+                sync_claimed_by = NULL,
+                sync_claim_expires_at_unix_ms = NULL
+            WHERE sync_state = 'pending'
+              AND sync_claim_token = ?
+            "#,
+        )
+        .bind(claim_token.as_str())
+        .execute(&self.pool)
+        .await
+        .map_err(SqliteError::Sqlx)?;
+
+        Ok(())
+    }
+
+    async fn try_mark_quarantined(&self, record: &QuarantineRecord) -> Result<(), SqliteError> {
+        let mut tx = self.pool.begin().await.map_err(SqliteError::Sqlx)?;
+
+        let result = sqlx::query(
+            r#"
+            UPDATE ingest_object_sync_states
+            SET
+                sync_state = 'quarantined',
+                terminal_at_unix_ms = ?,
+                sync_claim_token = NULL,
+                sync_claimed_by = NULL,
+                sync_claim_expires_at_unix_ms = NULL
+            WHERE sync_state = 'pending'
+              AND ingest_object_id = ?
+              AND sync_claim_token = ?
+            "#,
+        )
+        .bind(record.quarantined_at_unix_ms)
+        .bind(record.ingest_object_id.to_string())
+        .bind(record.claim_token.as_str())
+        .execute(&mut *tx)
+        .await
+        .map_err(SqliteError::Sqlx)?;
+
+        if result.rows_affected() == 0 {
+            return Err(SqliteError::StaleSyncClaim);
+        }
+
+        sqlx::query(
+            r#"
+            INSERT INTO ingest_object_quarantines (
+                ingest_object_id,
+                category,
+                reason,
+                original_object_key,
+                quarantine_object_key,
+                quarantined_at_unix_ms
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            "#,
+        )
+        .bind(record.ingest_object_id.to_string())
+        .bind(record.category.as_str())
+        .bind(record.reason.as_str())
+        .bind(record.original_object_key.as_str())
+        .bind(record.quarantine_object_key.as_str())
+        .bind(record.quarantined_at_unix_ms)
+        .execute(&mut *tx)
+        .await
+        .map_err(SqliteError::Sqlx)?;
+
+        sqlx::query("UPDATE ingest_objects SET object_key = ? WHERE ingest_object_id = ?")
+            .bind(record.quarantine_object_key.as_str())
+            .bind(record.ingest_object_id.to_string())
+            .execute(&mut *tx)
+            .await
+            .map_err(SqliteError::Sqlx)?;
+
+        tx.commit().await.map_err(SqliteError::Sqlx)?;
+
+        Ok(())
     }
 }
 
@@ -247,4 +584,56 @@ fn to_unix_ms(field: &'static str, time: SystemTime) -> Result<i64, SqliteError>
         .map_err(|_| SqliteError::TimeBeforeUnixEpoch { field })?;
 
     i64::try_from(duration.as_millis()).map_err(|_| SqliteError::TimeOutOfRange { field })
+}
+
+fn current_unix_ms() -> Result<i64, SqliteError> {
+    to_unix_ms("current_time", SystemTime::now())
+}
+
+fn duration_to_i64(field: &'static str, duration: Duration) -> Result<i64, SqliteError> {
+    i64::try_from(duration.as_millis()).map_err(|_| SqliteError::DurationOutOfRange { field })
+}
+
+fn usize_to_i64(field: &'static str, value: usize) -> Result<i64, SqliteError> {
+    i64::try_from(value).map_err(|_| SqliteError::IntegerOutOfRange {
+        field,
+        value: value as u64,
+    })
+}
+
+struct OrderedClaimedSyncObject {
+    received_at_unix_ms: i64,
+    object: ClaimedSyncObject,
+}
+
+fn parse_object_key(row: &sqlx::sqlite::SqliteRow, column: &str) -> Result<ObjectKey, SqliteError> {
+    let value = read_string(row, column)?;
+    ObjectKey::new(value).map_err(|e| invalid_sync_metadata(column, e))
+}
+
+fn parse_content_length(row: &sqlx::sqlite::SqliteRow, column: &str) -> Result<u64, SqliteError> {
+    let value = row.try_get::<i64, _>(column).map_err(SqliteError::Sqlx)?;
+
+    u64::try_from(value).map_err(|_| SqliteError::InvalidStoredSyncMetadata {
+        column: column.to_owned(),
+        reason: "must not be negative".to_owned(),
+    })
+}
+
+fn read_string(row: &sqlx::sqlite::SqliteRow, column: &str) -> Result<String, SqliteError> {
+    row.try_get::<String, _>(column).map_err(SqliteError::Sqlx)
+}
+
+fn invalid_sync_metadata(column: &str, err: impl std::fmt::Display) -> SqliteError {
+    SqliteError::InvalidStoredSyncMetadata {
+        column: column.to_owned(),
+        reason: err.to_string(),
+    }
+}
+
+fn sync_repository_error(message: &'static str) -> impl FnOnce(SqliteError) -> SyncRepositoryError {
+    move |err| {
+        Span::current().record("error.type", error_kind(&err));
+        SyncRepositoryError::with_source(message, err)
+    }
 }

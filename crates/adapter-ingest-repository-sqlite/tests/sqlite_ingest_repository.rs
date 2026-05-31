@@ -7,6 +7,10 @@ use raccoon_service_ingest::{
     IngestPayloadRepresentation, IngestRepository, IngestSource, IngestUploadId,
     ReceivedIngestObject,
 };
+use raccoon_service_sync::{
+    QuarantineCategory, QuarantineRecord, SyncClaimToken, SyncQuarantineRepository,
+    SyncSourceRepository, SyncWorkerId,
+};
 use sqlx::{Row, SqlitePool};
 use uuid::Uuid;
 
@@ -76,11 +80,20 @@ async fn migrations_create_ingest_objects_table() {
     let pool = migrated_pool().await;
 
     let table_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'ingest_objects'",
+        r#"
+        SELECT COUNT(*)
+        FROM sqlite_master
+        WHERE type = 'table'
+          AND name IN (
+              'ingest_objects',
+              'ingest_object_sync_states',
+              'ingest_object_quarantines'
+          )
+        "#,
     )
     .fetch_one(&pool)
     .await
-    .expect("query table");
+    .expect("query tables");
 
     let index_count: i64 = sqlx::query_scalar(
         r#"
@@ -90,7 +103,10 @@ async fn migrations_create_ingest_objects_table() {
           AND name IN (
               'idx_ingest_objects_upload_id',
               'idx_ingest_objects_received_at',
-              'idx_ingest_objects_study_series_sop'
+              'idx_ingest_objects_study_series_sop',
+              'idx_ingest_object_sync_states_claim',
+              'idx_ingest_object_sync_states_terminal',
+              'idx_ingest_object_quarantines_category'
           )
         "#,
     )
@@ -98,18 +114,32 @@ async fn migrations_create_ingest_objects_table() {
     .await
     .expect("query indexes");
 
-    let columns = sqlx::query("PRAGMA table_info(ingest_objects)")
+    let ingest_columns = sqlx::query("PRAGMA table_info(ingest_objects)")
         .fetch_all(&pool)
         .await
-        .expect("query columns")
+        .expect("query ingest columns")
+        .into_iter()
+        .map(|row| row.get::<String, _>("name"))
+        .collect::<Vec<_>>();
+    let sync_columns = sqlx::query("PRAGMA table_info(ingest_object_sync_states)")
+        .fetch_all(&pool)
+        .await
+        .expect("query sync columns")
+        .into_iter()
+        .map(|row| row.get::<String, _>("name"))
+        .collect::<Vec<_>>();
+    let quarantine_columns = sqlx::query("PRAGMA table_info(ingest_object_quarantines)")
+        .fetch_all(&pool)
+        .await
+        .expect("query quarantine columns")
         .into_iter()
         .map(|row| row.get::<String, _>("name"))
         .collect::<Vec<_>>();
 
-    assert_eq!(table_count, 1);
-    assert_eq!(index_count, 3);
+    assert_eq!(table_count, 3);
+    assert_eq!(index_count, 6);
     assert_eq!(
-        columns,
+        ingest_columns,
         [
             "ingest_object_id",
             "upload_id",
@@ -128,6 +158,29 @@ async fn migrations_create_ingest_objects_table() {
             "outcome_kind",
             "outcome_reason",
             "received_at_unix_ms",
+        ]
+    );
+    assert_eq!(
+        sync_columns,
+        [
+            "ingest_object_id",
+            "sync_state",
+            "sync_claim_token",
+            "sync_claimed_by",
+            "sync_claim_expires_at_unix_ms",
+            "synced_at_unix_ms",
+            "terminal_at_unix_ms",
+        ]
+    );
+    assert_eq!(
+        quarantine_columns,
+        [
+            "ingest_object_id",
+            "category",
+            "reason",
+            "original_object_key",
+            "quarantine_object_key",
+            "quarantined_at_unix_ms",
         ]
     );
 }
@@ -411,4 +464,403 @@ async fn pre_epoch_received_at_fails_before_insert() {
 
     assert!(store.record_received_object(&record).await.is_err());
     assert_eq!(object_count(&pool).await, 0);
+}
+
+#[tokio::test]
+async fn claim_pending_objects_claims_only_stored_pending_rows() {
+    let pool = migrated_pool().await;
+    let store = SqliteIngestRepository::new(pool.clone());
+    let mut rejected = record(2, "sync/rejected.dcm");
+    rejected.outcome = IngestObjectOutcome::RejectedCannotUnderstand {
+        reason: "bad dicom".to_string(),
+    };
+
+    store
+        .record_received_objects(&[record(1, "sync/stored.dcm"), rejected])
+        .await
+        .expect("insert records");
+
+    let claims = store
+        .claim_pending_objects(&SyncWorkerId::new("worker-1"), 10, Duration::from_secs(30))
+        .await
+        .expect("claim pending");
+
+    assert_eq!(claims.len(), 1);
+    assert_eq!(claims[0].object_key, object_key("sync/stored.dcm"));
+
+    let row = sqlx::query(
+        "SELECT sync_state, sync_claim_token, sync_claimed_by \
+         FROM ingest_object_sync_states WHERE ingest_object_id = ?",
+    )
+    .bind(claims[0].ingest_object_id.to_string())
+    .fetch_one(&pool)
+    .await
+    .expect("fetch claimed row");
+
+    assert_eq!(row.get::<String, _>("sync_state"), "pending");
+    assert_eq!(
+        row.get::<Option<String>, _>("sync_claimed_by"),
+        Some("worker-1".to_string())
+    );
+    assert!(row.get::<Option<String>, _>("sync_claim_token").is_some());
+
+    let rejected_sync_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) \
+         FROM ingest_object_sync_states s \
+         JOIN ingest_objects i ON i.ingest_object_id = s.ingest_object_id \
+         WHERE i.object_key = ?",
+    )
+    .bind("sync/rejected.dcm")
+    .fetch_one(&pool)
+    .await
+    .expect("count rejected sync rows");
+    assert_eq!(rejected_sync_count, 0);
+}
+
+#[tokio::test]
+async fn active_claims_are_excluded_and_expired_claims_reclaim() {
+    let pool = migrated_pool().await;
+    let store = SqliteIngestRepository::new(pool.clone());
+
+    store
+        .record_received_objects(&[record(1, "sync/one.dcm"), record(2, "sync/two.dcm")])
+        .await
+        .expect("insert records");
+
+    let first = store
+        .claim_pending_objects(&SyncWorkerId::new("worker-1"), 1, Duration::from_secs(30))
+        .await
+        .expect("first claim");
+    assert_eq!(first.len(), 1);
+
+    let second = store
+        .claim_pending_objects(&SyncWorkerId::new("worker-2"), 10, Duration::from_secs(30))
+        .await
+        .expect("second claim");
+    assert_eq!(second.len(), 1);
+    assert_ne!(second[0].ingest_object_id, first[0].ingest_object_id);
+
+    sqlx::query(
+        "UPDATE ingest_object_sync_states SET sync_claim_expires_at_unix_ms = 0 \
+         WHERE ingest_object_id = ?",
+    )
+    .bind(first[0].ingest_object_id.to_string())
+    .execute(&pool)
+    .await
+    .expect("expire first claim");
+
+    let reclaimed = store
+        .claim_pending_objects(&SyncWorkerId::new("worker-3"), 10, Duration::from_secs(30))
+        .await
+        .expect("reclaim expired");
+
+    assert_eq!(reclaimed.len(), 1);
+    assert_eq!(reclaimed[0].ingest_object_id, first[0].ingest_object_id);
+    assert_ne!(reclaimed[0].claim_token, first[0].claim_token);
+}
+
+#[tokio::test]
+async fn claim_order_is_received_at_then_ingest_object_id() {
+    let pool = migrated_pool().await;
+    let store = SqliteIngestRepository::new(pool.clone());
+    let mut later = record(2, "sync/later.dcm");
+    later.received_at = UNIX_EPOCH + Duration::from_millis(20);
+    let mut earlier_high_id = record(3, "sync/earlier-high.dcm");
+    earlier_high_id.received_at = UNIX_EPOCH + Duration::from_millis(10);
+    let mut earlier_low_id = record(1, "sync/earlier-low.dcm");
+    earlier_low_id.received_at = UNIX_EPOCH + Duration::from_millis(10);
+
+    store
+        .record_received_objects(&[later, earlier_high_id, earlier_low_id])
+        .await
+        .expect("insert records");
+
+    let claims = store
+        .claim_pending_objects(&SyncWorkerId::new("worker-1"), 3, Duration::from_secs(30))
+        .await
+        .expect("claim pending");
+
+    let keys = claims
+        .iter()
+        .map(|claim| claim.object_key.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        keys,
+        [
+            "sync/earlier-low.dcm",
+            "sync/earlier-high.dcm",
+            "sync/later.dcm"
+        ]
+    );
+}
+
+#[tokio::test]
+async fn mark_synced_requires_active_claim_token() {
+    let pool = migrated_pool().await;
+    let store = SqliteIngestRepository::new(pool.clone());
+
+    store
+        .record_received_object(&record(1, "sync/synced.dcm"))
+        .await
+        .expect("insert record");
+    let claim = store
+        .claim_pending_objects(&SyncWorkerId::new("worker-1"), 1, Duration::from_secs(30))
+        .await
+        .expect("claim pending")
+        .pop()
+        .expect("one claim");
+
+    assert!(
+        store
+            .mark_synced(&SyncClaimToken::new("stale-token"))
+            .await
+            .is_err()
+    );
+    store
+        .mark_synced(&claim.claim_token)
+        .await
+        .expect("mark synced");
+
+    let row = sqlx::query(
+        "SELECT sync_state, sync_claim_token, synced_at_unix_ms, terminal_at_unix_ms \
+         FROM ingest_object_sync_states WHERE ingest_object_id = ?",
+    )
+    .bind(claim.ingest_object_id.to_string())
+    .fetch_one(&pool)
+    .await
+    .expect("fetch synced row");
+
+    assert_eq!(row.get::<String, _>("sync_state"), "synced");
+    assert!(row.get::<Option<String>, _>("sync_claim_token").is_none());
+    assert!(row.get::<Option<i64>, _>("synced_at_unix_ms").is_some());
+    assert!(row.get::<Option<i64>, _>("terminal_at_unix_ms").is_some());
+}
+
+#[tokio::test]
+async fn release_claim_clears_only_pending_claim() {
+    let pool = migrated_pool().await;
+    let store = SqliteIngestRepository::new(pool.clone());
+
+    store
+        .record_received_objects(&[record(1, "sync/retry.dcm"), record(2, "sync/done.dcm")])
+        .await
+        .expect("insert records");
+    let mut claims = store
+        .claim_pending_objects(&SyncWorkerId::new("worker-1"), 2, Duration::from_secs(30))
+        .await
+        .expect("claim pending");
+    let done = claims.pop().expect("done claim");
+    let retry = claims.pop().expect("retry claim");
+
+    store
+        .mark_synced(&done.claim_token)
+        .await
+        .expect("mark synced");
+    store
+        .release_claim(&done.claim_token)
+        .await
+        .expect("stale terminal release is noop");
+    store
+        .release_claim(&retry.claim_token)
+        .await
+        .expect("release retry");
+
+    let retry_token: Option<String> = sqlx::query_scalar(
+        "SELECT sync_claim_token FROM ingest_object_sync_states WHERE ingest_object_id = ?",
+    )
+    .bind(retry.ingest_object_id.to_string())
+    .fetch_one(&pool)
+    .await
+    .expect("fetch retry token");
+    let done_state: String = sqlx::query_scalar(
+        "SELECT sync_state FROM ingest_object_sync_states WHERE ingest_object_id = ?",
+    )
+    .bind(done.ingest_object_id.to_string())
+    .fetch_one(&pool)
+    .await
+    .expect("fetch done state");
+
+    assert!(retry_token.is_none());
+    assert_eq!(done_state, "synced");
+}
+
+#[tokio::test]
+async fn mark_quarantined_requires_claim_and_records_metadata() {
+    let pool = migrated_pool().await;
+    let store = SqliteIngestRepository::new(pool.clone());
+
+    store
+        .record_received_object(&record(1, "sync/original.dcm"))
+        .await
+        .expect("insert record");
+    let claim = store
+        .claim_pending_objects(&SyncWorkerId::new("worker-1"), 1, Duration::from_secs(30))
+        .await
+        .expect("claim pending")
+        .pop()
+        .expect("one claim");
+
+    let stale_record = QuarantineRecord {
+        ingest_object_id: claim.ingest_object_id.clone(),
+        claim_token: SyncClaimToken::new("stale-token"),
+        category: QuarantineCategory::Validation,
+        reason: "missing uid".to_string(),
+        original_object_key: claim.object_key.clone(),
+        quarantine_object_key: object_key("sync/quarantine/stale"),
+        quarantined_at_unix_ms: 123,
+    };
+    assert!(store.mark_quarantined(&stale_record).await.is_err());
+
+    let quarantine_record = QuarantineRecord {
+        ingest_object_id: claim.ingest_object_id.clone(),
+        claim_token: claim.claim_token,
+        category: QuarantineCategory::Policy,
+        reason: "metadata limit exceeded".to_string(),
+        original_object_key: claim.object_key,
+        quarantine_object_key: object_key("sync/quarantine/1"),
+        quarantined_at_unix_ms: 456,
+    };
+    store
+        .mark_quarantined(&quarantine_record)
+        .await
+        .expect("mark quarantined");
+
+    let sync_row = sqlx::query(
+        "SELECT sync_state, terminal_at_unix_ms, sync_claim_token \
+         FROM ingest_object_sync_states WHERE ingest_object_id = ?",
+    )
+    .bind(quarantine_record.ingest_object_id.to_string())
+    .fetch_one(&pool)
+    .await
+    .expect("fetch quarantine sync row");
+    let quarantine_row = sqlx::query(
+        "SELECT category, reason, original_object_key, quarantine_object_key, \
+                quarantined_at_unix_ms \
+         FROM ingest_object_quarantines WHERE ingest_object_id = ?",
+    )
+    .bind(quarantine_record.ingest_object_id.to_string())
+    .fetch_one(&pool)
+    .await
+    .expect("fetch quarantine row");
+    let object_key: String =
+        sqlx::query_scalar("SELECT object_key FROM ingest_objects WHERE ingest_object_id = ?")
+            .bind(quarantine_record.ingest_object_id.to_string())
+            .fetch_one(&pool)
+            .await
+            .expect("fetch current object key");
+
+    assert_eq!(sync_row.get::<String, _>("sync_state"), "quarantined");
+    assert_eq!(sync_row.get::<i64, _>("terminal_at_unix_ms"), 456);
+    assert!(
+        sync_row
+            .get::<Option<String>, _>("sync_claim_token")
+            .is_none()
+    );
+    assert_eq!(object_key, "sync/quarantine/1");
+    assert_eq!(quarantine_row.get::<String, _>("category"), "policy");
+    assert_eq!(
+        quarantine_row.get::<String, _>("reason"),
+        "metadata limit exceeded"
+    );
+    assert_eq!(
+        quarantine_row.get::<String, _>("original_object_key"),
+        "sync/original.dcm"
+    );
+    assert_eq!(
+        quarantine_row.get::<String, _>("quarantine_object_key"),
+        "sync/quarantine/1"
+    );
+    assert_eq!(quarantine_row.get::<i64, _>("quarantined_at_unix_ms"), 456);
+
+    let reclaimed = store
+        .claim_pending_objects(&SyncWorkerId::new("worker-2"), 10, Duration::from_secs(30))
+        .await
+        .expect("claim after quarantine");
+    assert!(reclaimed.is_empty());
+}
+
+#[tokio::test]
+async fn duplicate_quarantine_key_rolls_back_terminal_update() {
+    let pool = migrated_pool().await;
+    let store = SqliteIngestRepository::new(pool.clone());
+
+    store
+        .record_received_objects(&[
+            record(1, "sync/original-one.dcm"),
+            record(2, "sync/original-two.dcm"),
+        ])
+        .await
+        .expect("insert records");
+    let claims = store
+        .claim_pending_objects(&SyncWorkerId::new("worker-1"), 2, Duration::from_secs(30))
+        .await
+        .expect("claim pending");
+    let first = claims
+        .iter()
+        .find(|claim| claim.object_key.as_str() == "sync/original-one.dcm")
+        .expect("first claim");
+    let second = claims
+        .iter()
+        .find(|claim| claim.object_key.as_str() == "sync/original-two.dcm")
+        .expect("second claim");
+
+    let first_record = QuarantineRecord {
+        ingest_object_id: first.ingest_object_id.clone(),
+        claim_token: first.claim_token.clone(),
+        category: QuarantineCategory::Validation,
+        reason: "missing uid".to_string(),
+        original_object_key: first.object_key.clone(),
+        quarantine_object_key: object_key("sync/quarantine/duplicate"),
+        quarantined_at_unix_ms: 100,
+    };
+    store
+        .mark_quarantined(&first_record)
+        .await
+        .expect("mark first quarantined");
+
+    let second_record = QuarantineRecord {
+        ingest_object_id: second.ingest_object_id.clone(),
+        claim_token: second.claim_token.clone(),
+        category: QuarantineCategory::Policy,
+        reason: "policy".to_string(),
+        original_object_key: second.object_key.clone(),
+        quarantine_object_key: object_key("sync/quarantine/duplicate"),
+        quarantined_at_unix_ms: 200,
+    };
+    assert!(store.mark_quarantined(&second_record).await.is_err());
+
+    let second_sync = sqlx::query(
+        "SELECT sync_state, sync_claim_token, terminal_at_unix_ms \
+         FROM ingest_object_sync_states WHERE ingest_object_id = ?",
+    )
+    .bind(second.ingest_object_id.to_string())
+    .fetch_one(&pool)
+    .await
+    .expect("fetch second sync row");
+    let second_object_key: String =
+        sqlx::query_scalar("SELECT object_key FROM ingest_objects WHERE ingest_object_id = ?")
+            .bind(second.ingest_object_id.to_string())
+            .fetch_one(&pool)
+            .await
+            .expect("fetch second object key");
+    let second_quarantine_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM ingest_object_quarantines WHERE ingest_object_id = ?",
+    )
+    .bind(second.ingest_object_id.to_string())
+    .fetch_one(&pool)
+    .await
+    .expect("count second quarantine records");
+
+    assert_eq!(second_sync.get::<String, _>("sync_state"), "pending");
+    assert_eq!(
+        second_sync.get::<Option<String>, _>("sync_claim_token"),
+        Some(second.claim_token.to_string())
+    );
+    assert!(
+        second_sync
+            .get::<Option<i64>, _>("terminal_at_unix_ms")
+            .is_none()
+    );
+    assert_eq!(second_object_key, "sync/original-two.dcm");
+    assert_eq!(second_quarantine_count, 0);
 }

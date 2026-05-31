@@ -5,7 +5,9 @@ edition.workspace = true
 
 [dependencies]
 async-trait = "0.1.89"
+raccoon-contract-object-store = { path = "../contract-object-store" }
 raccoon-service-ingest = { path = "../service-ingest" }
+raccoon-service-sync = { path = "../service-sync" }
 sqlx = { version = "0.9.0", default-features = false, features = ["sqlite", "runtime-tokio", "migrate", "macros"] }
 thiserror = "2.0.18"
 tracing.workspace = true

@@ -23,6 +23,9 @@ pub enum SqliteReadRepositoryError {
     #[error("invalid stored retrieve metadata in column '{column}': {reason}")]
     InvalidStoredRetrieveMetadata { column: String, reason: String },
 
+    #[error("{field} value {value} is outside SQLite INTEGER range")]
+    IntegerOutOfRange { field: &'static str, value: u64 },
+
     #[error("internal error: {0}")]
     InternalError(String),
 }

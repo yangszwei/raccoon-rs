@@ -7,6 +7,7 @@ use raccoon_contract_dicom::{
 use raccoon_contract_object_store::ObjectKey;
 use raccoon_service_query::{DicomQuery, QueryPage, QueryRepository, QueryRepositoryError};
 use raccoon_service_retrieve::{InstanceRef, RetrieveRepository, RetrieveRepositoryError};
+use raccoon_service_sync::{SyncReadModelWriter, SyncRepositoryError, SyncedReadModelObject};
 use sqlx::{
     Row, SqlitePool,
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous},
@@ -226,7 +227,180 @@ impl RetrieveRepository for SqliteReadRepository {
     }
 }
 
+#[async_trait]
+impl SyncReadModelWriter for SqliteReadRepository {
+    #[instrument(
+        skip_all,
+        fields(
+            sync.study_instance_uid = %object.study.study_instance_uid,
+            sync.series_instance_uid = %object.series.series_instance_uid,
+            sync.sop_instance_uid = %object.instance.identity.sop_instance_uid,
+            db.system = "sqlite",
+            error.type = tracing::field::Empty,
+        )
+    )]
+    async fn upsert_synced_object(
+        &self,
+        object: &SyncedReadModelObject,
+    ) -> Result<(), SyncRepositoryError> {
+        self.try_upsert_synced_object(object).await.map_err(|err| {
+            Span::current().record("error.type", read_error_kind(&err));
+            SyncRepositoryError::with_source("failed to upsert synced read model object", err)
+        })
+    }
+}
+
 impl SqliteReadRepository {
+    async fn try_upsert_synced_object(
+        &self,
+        object: &SyncedReadModelObject,
+    ) -> Result<(), SqliteReadRepositoryError> {
+        let object_size_bytes = to_i64("object_size_bytes", object.instance.object_size_bytes)?;
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(SqliteReadRepositoryError::Query)?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO studies (
+                study_instance_uid,
+                patient_id,
+                patient_name,
+                patient_birth_date,
+                patient_sex,
+                study_date,
+                study_time,
+                accession_number,
+                study_id,
+                study_description,
+                referring_physician_name,
+                synced_at_unix_ms
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(study_instance_uid) DO UPDATE SET
+                patient_id = COALESCE(excluded.patient_id, studies.patient_id),
+                patient_name = COALESCE(excluded.patient_name, studies.patient_name),
+                patient_birth_date = COALESCE(excluded.patient_birth_date, studies.patient_birth_date),
+                patient_sex = COALESCE(excluded.patient_sex, studies.patient_sex),
+                study_date = COALESCE(excluded.study_date, studies.study_date),
+                study_time = COALESCE(excluded.study_time, studies.study_time),
+                accession_number = COALESCE(excluded.accession_number, studies.accession_number),
+                study_id = COALESCE(excluded.study_id, studies.study_id),
+                study_description = COALESCE(excluded.study_description, studies.study_description),
+                referring_physician_name = COALESCE(excluded.referring_physician_name, studies.referring_physician_name),
+                synced_at_unix_ms = excluded.synced_at_unix_ms
+            "#,
+        )
+        .bind(object.study.study_instance_uid.as_str())
+        .bind(object.study.patient_id.as_deref())
+        .bind(object.study.patient_name.as_deref())
+        .bind(object.study.patient_birth_date.as_deref())
+        .bind(object.study.patient_sex.as_deref())
+        .bind(object.study.study_date.as_deref())
+        .bind(object.study.study_time.as_deref())
+        .bind(object.study.accession_number.as_deref())
+        .bind(object.study.study_id.as_deref())
+        .bind(object.study.study_description.as_deref())
+        .bind(object.study.referring_physician_name.as_deref())
+        .bind(object.synced_at_unix_ms)
+        .execute(&mut *tx)
+        .await
+        .map_err(SqliteReadRepositoryError::Query)?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO series (
+                series_instance_uid,
+                study_instance_uid,
+                modality,
+                series_number,
+                series_date,
+                series_time,
+                series_description,
+                body_part_examined,
+                synced_at_unix_ms
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(series_instance_uid) DO UPDATE SET
+                study_instance_uid = excluded.study_instance_uid,
+                modality = COALESCE(excluded.modality, series.modality),
+                series_number = COALESCE(excluded.series_number, series.series_number),
+                series_date = COALESCE(excluded.series_date, series.series_date),
+                series_time = COALESCE(excluded.series_time, series.series_time),
+                series_description = COALESCE(excluded.series_description, series.series_description),
+                body_part_examined = COALESCE(excluded.body_part_examined, series.body_part_examined),
+                synced_at_unix_ms = excluded.synced_at_unix_ms
+            "#,
+        )
+        .bind(object.series.series_instance_uid.as_str())
+        .bind(object.series.study_instance_uid.as_str())
+        .bind(object.series.modality.as_deref())
+        .bind(object.series.series_number)
+        .bind(object.series.series_date.as_deref())
+        .bind(object.series.series_time.as_deref())
+        .bind(object.series.series_description.as_deref())
+        .bind(object.series.body_part_examined.as_deref())
+        .bind(object.synced_at_unix_ms)
+        .execute(&mut *tx)
+        .await
+        .map_err(SqliteReadRepositoryError::Query)?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO instances (
+                sop_instance_uid,
+                sop_class_uid,
+                series_instance_uid,
+                study_instance_uid,
+                instance_number,
+                acquisition_date_time,
+                transfer_syntax_uid,
+                object_key,
+                object_size_bytes,
+                attributes,
+                synced_at_unix_ms
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(sop_instance_uid) DO UPDATE SET
+                sop_class_uid = excluded.sop_class_uid,
+                series_instance_uid = excluded.series_instance_uid,
+                study_instance_uid = excluded.study_instance_uid,
+                instance_number = excluded.instance_number,
+                acquisition_date_time = excluded.acquisition_date_time,
+                transfer_syntax_uid = excluded.transfer_syntax_uid,
+                object_key = excluded.object_key,
+                object_size_bytes = excluded.object_size_bytes,
+                attributes = excluded.attributes,
+                synced_at_unix_ms = excluded.synced_at_unix_ms
+            "#,
+        )
+        .bind(object.instance.identity.sop_instance_uid.as_str())
+        .bind(object.instance.identity.sop_class_uid.as_str())
+        .bind(object.instance.identity.series_instance_uid.as_str())
+        .bind(object.instance.identity.study_instance_uid.as_str())
+        .bind(object.instance.instance_number)
+        .bind(object.instance.acquisition_date_time.as_deref())
+        .bind(
+            object
+                .instance
+                .transfer_syntax_uid
+                .as_ref()
+                .map(|uid| uid.as_str()),
+        )
+        .bind(object.instance.object_key.as_str())
+        .bind(object_size_bytes)
+        .bind(object.instance.attributes_json.as_str())
+        .bind(object.synced_at_unix_ms)
+        .execute(&mut *tx)
+        .await
+        .map_err(SqliteReadRepositoryError::Query)?;
+
+        tx.commit()
+            .await
+            .map_err(SqliteReadRepositoryError::Query)?;
+
+        Ok(())
+    }
+
     async fn fetch_instance_refs(
         &self,
         sql: &'static str,
@@ -329,6 +503,31 @@ fn invalid_metadata(column: &str, err: impl std::fmt::Display) -> SqliteReadRepo
     SqliteReadRepositoryError::InvalidStoredRetrieveMetadata {
         column: column.to_owned(),
         reason: err.to_string(),
+    }
+}
+
+fn to_i64(field: &'static str, value: u64) -> Result<i64, SqliteReadRepositoryError> {
+    i64::try_from(value).map_err(|_| SqliteReadRepositoryError::IntegerOutOfRange { field, value })
+}
+
+fn read_error_kind(err: &SqliteReadRepositoryError) -> &'static str {
+    match err {
+        SqliteReadRepositoryError::Connect(_) => "raccoon_adapter_read_sqlite::Connect",
+        SqliteReadRepositoryError::Migrate(_) => "raccoon_adapter_read_sqlite::Migrate",
+        SqliteReadRepositoryError::Query(_) => "sqlx::Error",
+        SqliteReadRepositoryError::RowRead(_, _) => "raccoon_adapter_read_sqlite::RowRead",
+        SqliteReadRepositoryError::InvalidPredicate(_) => {
+            "raccoon_adapter_read_sqlite::InvalidPredicate"
+        }
+        SqliteReadRepositoryError::InvalidStoredRetrieveMetadata { .. } => {
+            "raccoon_adapter_read_sqlite::InvalidStoredRetrieveMetadata"
+        }
+        SqliteReadRepositoryError::IntegerOutOfRange { .. } => {
+            "raccoon_adapter_read_sqlite::IntegerOutOfRange"
+        }
+        SqliteReadRepositoryError::InternalError(_) => {
+            "raccoon_adapter_read_sqlite::InternalError"
+        }
     }
 }
 
