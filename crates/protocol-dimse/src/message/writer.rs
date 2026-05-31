@@ -1,5 +1,6 @@
 use dicom_dictionary_std::tags;
 use dicom_object::InMemDicomObject;
+use dicom_transfer_syntax_registry::TransferSyntax;
 use dicom_transfer_syntax_registry::entries::IMPLICIT_VR_LITTLE_ENDIAN;
 use dicom_ul::pdu::{PDataValue, PDataValueType, Pdu, PresentationContextResultReason};
 
@@ -53,6 +54,27 @@ impl DimseWriter {
             return Err(DimseError::protocol("send_data_pdv expects a data PDV"));
         }
         self.send_pdv(association, pdv).await
+    }
+
+    pub async fn send_data_set_object(
+        &mut self,
+        association: &mut DimseAssociation,
+        presentation_context_id: u8,
+        data_set: &InMemDicomObject,
+        transfer_syntax: &TransferSyntax,
+    ) -> Result<(), DimseError> {
+        let mut bytes = Vec::new();
+        data_set.write_dataset_with_ts(&mut bytes, transfer_syntax)?;
+        self.send_pdv(
+            association,
+            PDataValue {
+                presentation_context_id,
+                value_type: PDataValueType::Data,
+                is_last: true,
+                data: bytes,
+            },
+        )
+        .await
     }
 
     async fn send_pdv(

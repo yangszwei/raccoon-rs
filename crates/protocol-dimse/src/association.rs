@@ -1,4 +1,5 @@
 use dicom_object::InMemDicomObject;
+use dicom_transfer_syntax_registry::{TransferSyntaxIndex, TransferSyntaxRegistry};
 use dicom_ul::association::Association;
 use dicom_ul::pdu::{PDataValue, Pdu};
 use raccoon_service_application_entity_registry::AeTitle;
@@ -140,6 +141,17 @@ impl AssociationContext {
         Ok(command)
     }
 
+    /// Read a command that is nested inside the active DIMSE operation.
+    ///
+    /// C-GET invokes C-STORE sub-operations on the same association, so the
+    /// provider must read the C-STORE-RSP instead of reusing the cached
+    /// C-GET-RQ for the outer message cycle.
+    pub(crate) async fn read_suboperation_command(&mut self) -> Result<DimseCommand, DimseError> {
+        self.cached_command_object = None;
+        self.cached_command = None;
+        self.read_command().await
+    }
+
     /// Read one dataset PDV fragment for the active command.
     pub async fn read_data_pdv(&mut self) -> Result<Option<PDataValue>, DimseError> {
         self.reader.read_data_pdv(&mut self.association).await
@@ -159,6 +171,43 @@ impl AssociationContext {
     /// Send one dataset PDV fragment.
     pub async fn send_data_pdv(&mut self, pdv: PDataValue) -> Result<(), DimseError> {
         self.writer.send_data_pdv(&mut self.association, pdv).await
+    }
+
+    /// Serialize and send one DIMSE data set using the negotiated transfer syntax.
+    pub async fn send_data_set_object(
+        &mut self,
+        presentation_context_id: u8,
+        data_set: &InMemDicomObject,
+    ) -> Result<(), DimseError> {
+        let transfer_syntax_uid = self
+            .association
+            .presentation_contexts()
+            .iter()
+            .find(|pc| pc.id == presentation_context_id)
+            .map(|pc| pc.transfer_syntax.as_str())
+            .ok_or_else(|| {
+                DimseError::protocol(format!(
+                    "presentation context {} was not negotiated",
+                    presentation_context_id
+                ))
+            })?;
+        let transfer_syntax = TransferSyntaxRegistry
+            .get(transfer_syntax_uid)
+            .ok_or_else(|| {
+                DimseError::protocol(format!(
+                    "unsupported transfer syntax {}",
+                    transfer_syntax_uid
+                ))
+            })?;
+
+        self.writer
+            .send_data_set_object(
+                &mut self.association,
+                presentation_context_id,
+                data_set,
+                transfer_syntax,
+            )
+            .await
     }
 
     pub fn has_unfinished_data_set(&self) -> bool {

@@ -28,6 +28,8 @@ pub use registry::{
     DescribedServiceClassProvider, ServiceBinding, ServiceClassProvider, ServiceClassRegistry,
 };
 pub use service::{
-    CEchoRequest, CEchoResponse, CStoreRequest, CStoreResponse, CStoreStatus,
-    StorageServiceProvider, VerificationServiceProvider, verification_provider,
+    CEchoRequest, CEchoResponse, CFindRequest, CFindResponse, CFindStatus, CGetRequest,
+    CGetResponse, CGetStatus, CStoreRequest, CStoreResponse, CStoreStatus, QueryServiceProvider,
+    RetrieveServiceProvider, StorageServiceProvider, VerificationServiceProvider,
+    verification_provider,
 };
