@@ -149,4 +149,7 @@ pub enum SyncError {
 
     #[error("quarantine failed: {0}")]
     Quarantine(#[from] QuarantineError),
+
+    #[error("remote sync service failed: {0}")]
+    Remote(String),
 }

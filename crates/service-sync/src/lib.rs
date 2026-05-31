@@ -10,6 +10,8 @@
 //! claims and claim tokens, not in-memory service state.
 
 mod error;
+#[cfg(feature = "grpc")]
+mod grpc;
 mod model;
 mod parser;
 mod repository;
@@ -17,6 +19,11 @@ mod service;
 
 pub use error::{
     QuarantineError, SyncError, SyncParseError, SyncRepositoryError, SyncTerminalObjectError,
+};
+#[cfg(feature = "grpc")]
+pub use grpc::{
+    DicomSyncService, DicomSyncServiceClient, DicomSyncServiceServer, GrpcSyncServiceClient,
+    SyncGrpcService,
 };
 pub use model::{
     ClaimedSyncObject, QuarantineCategory, QuarantineRecord, SyncBatchResult, SyncClaimToken,

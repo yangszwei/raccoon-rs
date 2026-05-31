@@ -1,0 +1,23 @@
+syntax = "proto3";
+
+package raccoon.sync.v1;
+
+// Polling CQRS sync runtime service.
+//
+// The service name is DicomSyncService to avoid a naming collision with the
+// Rust domain trait raccoon_service_sync::SyncService.
+service DicomSyncService {
+  // Claim and process one sync batch for the given worker.
+  rpc SyncOnce(SyncOnceRequest) returns (SyncOnceResponse);
+}
+
+message SyncOnceRequest {
+  string worker_id = 1;
+}
+
+message SyncOnceResponse {
+  uint64 claimed = 1;
+  uint64 synced = 2;
+  uint64 quarantined = 3;
+  uint64 retryable_failures = 4;
+}

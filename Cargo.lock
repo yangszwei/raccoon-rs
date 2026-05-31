@@ -2195,6 +2195,9 @@ dependencies = [
  "dicom-json",
  "dicom-object",
  "futures-util",
+ "opentelemetry",
+ "prost",
+ "protoc-bin-vendored",
  "raccoon-contract-dicom",
  "raccoon-contract-object-store",
  "raccoon-service-ingest",
@@ -2203,7 +2206,11 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-util",
+ "tonic",
+ "tonic-prost",
+ "tonic-prost-build",
  "tracing",
+ "tracing-opentelemetry",
 ]
 
 [[package]]
