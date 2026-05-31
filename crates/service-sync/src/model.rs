@@ -5,7 +5,7 @@ use raccoon_contract_dicom::{
     DicomInstanceIdentity, SeriesInstanceUid, StudyInstanceUid, TransferSyntaxUid,
 };
 use raccoon_contract_object_store::{ObjectKey, ObjectKeyError};
-use raccoon_service_ingest::IngestObjectId;
+use raccoon_service_ingest::{IngestObjectId, IngestPayloadRepresentation};
 
 /// Stable identifier for a sync worker.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -53,6 +53,8 @@ pub struct ClaimedSyncObject {
     pub ingest_object_id: IngestObjectId,
     pub object_key: ObjectKey,
     pub content_length: u64,
+    pub payload_representation: IngestPayloadRepresentation,
+    pub transfer_syntax_uid: Option<String>,
     pub claim_token: SyncClaimToken,
 }
 

@@ -90,6 +90,8 @@ trait SyncObjectParser: Send + Sync {
         body: ByteStream,
         object_key: ObjectKey,
         object_size_bytes: u64,
+        payload_representation: raccoon_service_ingest::IngestPayloadRepresentation,
+        transfer_syntax_uid: Option<String>,
         max_metadata_bytes: Option<u64>,
     ) -> Result<ParsedSyncObject, SyncParseError>;
 }
@@ -101,6 +103,8 @@ impl SyncObjectParser for DicomSyncParser {
         body: ByteStream,
         object_key: ObjectKey,
         object_size_bytes: u64,
+        payload_representation: raccoon_service_ingest::IngestPayloadRepresentation,
+        transfer_syntax_uid: Option<String>,
         max_metadata_bytes: Option<u64>,
     ) -> Result<ParsedSyncObject, SyncParseError> {
         DicomSyncParser::parse(
@@ -108,6 +112,8 @@ impl SyncObjectParser for DicomSyncParser {
             body,
             object_key,
             object_size_bytes,
+            payload_representation,
+            transfer_syntax_uid,
             max_metadata_bytes,
         )
         .await
@@ -188,6 +194,8 @@ impl StandardSyncService {
                 object.body,
                 claim.object_key.clone(),
                 object.metadata.content_length,
+                claim.payload_representation,
+                claim.transfer_syntax_uid.clone(),
                 self.options.max_metadata_bytes(),
             )
             .await
@@ -456,6 +464,8 @@ mod tests {
             _body: ByteStream,
             object_key: ObjectKey,
             _object_size_bytes: u64,
+            _payload_representation: raccoon_service_ingest::IngestPayloadRepresentation,
+            _transfer_syntax_uid: Option<String>,
             _max_metadata_bytes: Option<u64>,
         ) -> Result<ParsedSyncObject, SyncParseError> {
             match *self.mode.lock().unwrap() {
@@ -536,6 +546,8 @@ mod tests {
             ingest_object_id: IngestObjectId::default(),
             object_key: ObjectKey::new("ingest/object-1").unwrap(),
             content_length: 10,
+            payload_representation: raccoon_service_ingest::IngestPayloadRepresentation::DicomFile,
+            transfer_syntax_uid: None,
             claim_token: SyncClaimToken::new("claim-1"),
         }
     }

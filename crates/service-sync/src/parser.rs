@@ -2,13 +2,16 @@ use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::pin::Pin;
 use std::str::FromStr;
 
-use dicom_object::{DicomCollector, DicomObject, InMemDicomObject};
+use dicom_object::{
+    DicomCollector, DicomCollectorOptions, DicomObject, InMemDicomObject, file::ReadPreamble,
+};
 use futures_util::StreamExt;
 use raccoon_contract_dicom::{
     DicomInstanceIdentity, SeriesInstanceUid, SopClassUid, SopInstanceUid, StudyInstanceUid,
     TransferSyntaxUid,
 };
 use raccoon_contract_object_store::{ByteStream, Bytes, ObjectKey, Result as ObjectStoreResult};
+use raccoon_service_ingest::IngestPayloadRepresentation;
 use tokio::runtime::Handle;
 
 use crate::error::SyncParseError;
@@ -36,6 +39,8 @@ impl DicomSyncParser {
         body: ByteStream,
         object_key: ObjectKey,
         object_size_bytes: u64,
+        payload_representation: IngestPayloadRepresentation,
+        transfer_syntax_uid: Option<String>,
         max_metadata_bytes: Option<u64>,
     ) -> Result<ParsedSyncObject, SyncParseError> {
         let handle = Handle::current();
@@ -45,6 +50,8 @@ impl DicomSyncParser {
                 body,
                 object_key,
                 object_size_bytes,
+                payload_representation,
+                transfer_syntax_uid,
                 max_metadata_bytes,
             )
         })
@@ -58,13 +65,41 @@ fn parse_stream_blocking(
     body: ByteStream,
     object_key: ObjectKey,
     object_size_bytes: u64,
+    payload_representation: IngestPayloadRepresentation,
+    transfer_syntax_uid: Option<String>,
     max_metadata_bytes: Option<u64>,
 ) -> Result<ParsedSyncObject, SyncParseError> {
     let reader = BoundedByteStreamReader::new(handle, body, max_metadata_bytes);
-    parse_reader(BufReader::new(reader), object_key, object_size_bytes)
+    parse_reader(
+        BufReader::new(reader),
+        object_key,
+        object_size_bytes,
+        payload_representation,
+        transfer_syntax_uid,
+    )
 }
 
 fn parse_reader<R: Read + Seek>(
+    reader: BufReader<R>,
+    object_key: ObjectKey,
+    object_size_bytes: u64,
+    payload_representation: IngestPayloadRepresentation,
+    transfer_syntax_uid: Option<String>,
+) -> Result<ParsedSyncObject, SyncParseError> {
+    match payload_representation {
+        IngestPayloadRepresentation::DicomDataSet => {
+            parse_dataset_reader(reader, object_key, object_size_bytes, transfer_syntax_uid)
+        }
+        IngestPayloadRepresentation::DicomFile | IngestPayloadRepresentation::Unknown => {
+            parse_file_reader(reader, object_key, object_size_bytes)
+        }
+        IngestPayloadRepresentation::DicomWebMetadataAndBulkData => Err(
+            SyncParseError::cannot_understand("DICOMweb metadata+bulkdata sync is not supported"),
+        ),
+    }
+}
+
+fn parse_file_reader<R: Read + Seek>(
     reader: BufReader<R>,
     object_key: ObjectKey,
     object_size_bytes: u64,
@@ -80,6 +115,31 @@ fn parse_reader<R: Read + Seek>(
         .read_dataset_up_to_pixeldata(&mut object)
         .map_err(|error| map_reader_or_parse_error(error, "failed to parse DICOM metadata"))?;
 
+    project_object(
+        object,
+        object_key,
+        object_size_bytes,
+        Some(transfer_syntax_uid),
+    )
+}
+
+fn parse_dataset_reader<R: Read + Seek>(
+    reader: BufReader<R>,
+    object_key: ObjectKey,
+    object_size_bytes: u64,
+    transfer_syntax_uid: Option<String>,
+) -> Result<ParsedSyncObject, SyncParseError> {
+    let transfer_syntax_uid = transfer_syntax_uid.ok_or_else(|| {
+        SyncParseError::cannot_understand("DICOM data set sync requires a transfer syntax UID")
+    })?;
+    let mut collector = DicomCollectorOptions::new()
+        .read_preamble(ReadPreamble::Never)
+        .expected_ts(transfer_syntax_uid.clone())
+        .from_reader(reader);
+    let mut object = InMemDicomObject::new_empty();
+    collector
+        .read_dataset_up_to_pixeldata(&mut object)
+        .map_err(|error| map_reader_or_parse_error(error, "failed to parse DICOM data set"))?;
     project_object(
         object,
         object_key,

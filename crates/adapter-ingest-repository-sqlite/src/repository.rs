@@ -4,8 +4,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 use raccoon_contract_object_store::ObjectKey;
 use raccoon_service_ingest::{
-    IngestObjectId, IngestObjectOutcome, IngestRepository, IngestRepositoryError,
-    ReceivedIngestObject,
+    IngestObjectId, IngestObjectOutcome, IngestPayloadRepresentation, IngestRepository,
+    IngestRepositoryError, ReceivedIngestObject,
 };
 use raccoon_service_sync::{
     ClaimedSyncObject, QuarantineRecord, SyncClaimToken, SyncQuarantineRepository,
@@ -288,7 +288,8 @@ impl SqliteIngestRepository {
             .collect::<Vec<_>>()
             .join(", ");
         let sql = format!(
-            "SELECT ingest_object_id, object_key, content_length, received_at_unix_ms \
+            "SELECT ingest_object_id, object_key, content_length, payload_representation, \
+                    transfer_syntax_uid, received_at_unix_ms \
              FROM ingest_objects WHERE ingest_object_id IN ({placeholders})"
         );
         let mut stmt = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()));
@@ -315,6 +316,10 @@ impl SqliteIngestRepository {
                     })?;
             let object_key = parse_object_key(&row, "object_key")?;
             let content_length = parse_content_length(&row, "content_length")?;
+            let payload_representation = parse_payload_representation(&row)?;
+            let transfer_syntax_uid = row
+                .try_get::<Option<String>, _>("transfer_syntax_uid")
+                .map_err(SqliteError::Sqlx)?;
             let received_at_unix_ms = row
                 .try_get::<i64, _>("received_at_unix_ms")
                 .map_err(SqliteError::Sqlx)?;
@@ -324,6 +329,8 @@ impl SqliteIngestRepository {
                     ingest_object_id,
                     object_key,
                     content_length,
+                    payload_representation,
+                    transfer_syntax_uid,
                     claim_token,
                 },
             });
@@ -622,6 +629,24 @@ fn parse_content_length(row: &sqlx::sqlite::SqliteRow, column: &str) -> Result<u
 
 fn read_string(row: &sqlx::sqlite::SqliteRow, column: &str) -> Result<String, SqliteError> {
     row.try_get::<String, _>(column).map_err(SqliteError::Sqlx)
+}
+
+fn parse_payload_representation(
+    row: &sqlx::sqlite::SqliteRow,
+) -> Result<IngestPayloadRepresentation, SqliteError> {
+    let value = read_string(row, "payload_representation")?;
+    match value.as_str() {
+        "dicom_file" => Ok(IngestPayloadRepresentation::DicomFile),
+        "dicom_dataset" => Ok(IngestPayloadRepresentation::DicomDataSet),
+        "dicomweb_metadata_and_bulk_data" => {
+            Ok(IngestPayloadRepresentation::DicomWebMetadataAndBulkData)
+        }
+        "unknown" => Ok(IngestPayloadRepresentation::Unknown),
+        other => Err(SqliteError::InvalidStoredSyncMetadata {
+            column: "payload_representation".to_owned(),
+            reason: format!("unsupported payload representation {other:?}"),
+        }),
+    }
 }
 
 fn invalid_sync_metadata(column: &str, err: impl std::fmt::Display) -> SqliteError {
