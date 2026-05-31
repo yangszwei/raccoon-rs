@@ -6,7 +6,8 @@ mod verification;
 
 pub use mov::{
     CMoveRequest, CMoveResponse, CMoveStatus, MoveDestinationError, MoveDestinationStore,
-    MoveServiceProvider, MoveStoreOutcome, MoveStoreRequest,
+    MoveServiceProvider, MoveStoreOutcome, MoveStoreRequest, RegistryMoveDestinationStore,
+    RegistryMoveDestinationStoreConfig,
 };
 pub use query::{CFindRequest, CFindResponse, CFindStatus, QueryServiceProvider};
 pub use retrieve::{CGetRequest, CGetResponse, CGetStatus, RetrieveServiceProvider};

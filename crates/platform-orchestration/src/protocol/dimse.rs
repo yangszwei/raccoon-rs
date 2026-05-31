@@ -1,10 +1,12 @@
 use std::sync::Arc;
 
 use raccoon_protocol_dimse::{
-    DimseListener, MoveDestinationStore, MoveServiceProvider, QueryServiceProvider,
+    DimseListener, MoveServiceProvider, QueryServiceProvider, RegistryMoveDestinationStore,
     RetrieveServiceProvider, ServiceClassRegistry, StorageServiceProvider, verification_provider,
 };
-use raccoon_service_application_entity_registry::LocalApplicationEntity;
+use raccoon_service_application_entity_registry::{
+    ApplicationEntityRegistry, LocalApplicationEntity,
+};
 use raccoon_service_ingest::IngestService;
 use raccoon_service_query::QueryService;
 use raccoon_service_retrieve::RetrieveService;
@@ -16,7 +18,8 @@ pub fn build_dimse_service_registry(
     ingest_service: Arc<dyn IngestService>,
     query_service: Arc<dyn QueryService>,
     retrieve_service: Arc<dyn RetrieveService>,
-    destination_store: Arc<dyn MoveDestinationStore>,
+    application_entity_registry: Arc<dyn ApplicationEntityRegistry + Send + Sync>,
+    local_ae: LocalApplicationEntity,
 ) -> ServiceClassRegistry {
     let mut registry = ServiceClassRegistry::new();
 
@@ -30,7 +33,8 @@ pub fn build_dimse_service_registry(
     ))));
     registry.register_described(Arc::new(build_move_service_provider(
         retrieve_service,
-        destination_store,
+        application_entity_registry,
+        local_ae,
     )));
 
     registry
@@ -58,8 +62,13 @@ pub fn build_retrieve_service_provider(
 /// Build a C-MOVE service provider with the default move SOP classes.
 pub fn build_move_service_provider(
     retrieve_service: Arc<dyn RetrieveService>,
-    destination_store: Arc<dyn MoveDestinationStore>,
+    application_entity_registry: Arc<dyn ApplicationEntityRegistry + Send + Sync>,
+    local_ae: LocalApplicationEntity,
 ) -> MoveServiceProvider {
+    let destination_store = Arc::new(RegistryMoveDestinationStore::new(
+        application_entity_registry,
+        local_ae,
+    ));
     MoveServiceProvider::with_default_move_sop_classes(retrieve_service, destination_store)
 }
 
