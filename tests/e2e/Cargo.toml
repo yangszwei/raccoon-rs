@@ -1,0 +1,9 @@
+[package]
+name = "raccoon-tests-e2e"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[[test]]
+name = "dimse"
+path = "dimse/mod.rs"
