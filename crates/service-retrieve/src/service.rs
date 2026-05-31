@@ -74,6 +74,7 @@ impl RetrieveService for StandardRetrieveService {
             stream: Box::pin(stream::iter(refs).then(move |ref_| {
                 let store = Arc::clone(&object_store);
                 async move {
+                    let sop_instance_uid = ref_.identity.sop_instance_uid.clone();
                     store
                         .get(&ref_.object_key)
                         .await
@@ -83,7 +84,10 @@ impl RetrieveService for StandardRetrieveService {
                             content_length: obj.metadata.content_length,
                             body: obj.body,
                         })
-                        .map_err(RetrieveError::ObjectStore)
+                        .map_err(|source| RetrieveError::ObjectStoreForInstance {
+                            sop_instance_uid,
+                            source,
+                        })
                 }
             })),
         })
@@ -535,8 +539,14 @@ mod tests {
         assert_eq!(result.instance_count, 2);
         let items = collect_stream(result).await;
         assert_eq!(items.len(), 2);
-        // First item fails (object store error), second succeeds.
-        assert!(matches!(items[0], Err(RetrieveError::ObjectStore(_))));
+        // First item fails with its SOP Instance UID preserved, second succeeds.
+        assert!(matches!(
+            &items[0],
+            Err(RetrieveError::ObjectStoreForInstance {
+                sop_instance_uid,
+                ..
+            }) if sop_instance_uid.as_str() == refs[0].identity.sop_instance_uid.as_str()
+        ));
         assert!(items[1].is_ok());
     }
 

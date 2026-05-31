@@ -1,83 +1,93 @@
+use std::str::FromStr;
+
 use dicom_core::{DataElement, PrimitiveValue, VR};
 use dicom_dictionary_std::tags;
 use dicom_object::InMemDicomObject;
+use raccoon_service_application_entity_registry::AeTitle;
 
 use crate::error::DimseError;
 use crate::message::{CommandField, DimseCommand, Priority, is_valid_uid};
 
-/// Parsed C-GET-RQ command payload.
+/// Parsed C-MOVE-RQ command payload.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CGetRequest {
+pub struct CMoveRequest {
     pub presentation_context_id: u8,
     pub message_id: u16,
     pub priority: Priority,
     pub affected_sop_class_uid: String,
-    pub originator_ae_title: Option<String>,
+    pub move_destination: String,
 }
 
-impl CGetRequest {
+impl CMoveRequest {
     pub fn from_command(command: &DimseCommand) -> Result<Self, DimseError> {
-        if command.command_field != CommandField::CGetRq {
+        if command.command_field != CommandField::CMoveRq {
             return Err(DimseError::protocol(format!(
-                "expected C-GET-RQ, got {}",
+                "expected C-MOVE-RQ, got {}",
                 command.command_field
             )));
         }
         if !command.has_data_set {
-            return Err(DimseError::protocol("C-GET-RQ must include a data set"));
+            return Err(DimseError::protocol("C-MOVE-RQ must include a data set"));
         }
         let affected_sop_class_uid = command
             .sop_class_uid
             .clone()
-            .ok_or_else(|| DimseError::protocol("missing Affected SOP Class UID in C-GET-RQ"))
+            .ok_or_else(|| DimseError::protocol("missing Affected SOP Class UID in C-MOVE-RQ"))
             .and_then(|uid| {
                 if is_valid_uid(&uid) {
                     Ok(uid)
                 } else {
                     Err(DimseError::protocol(
-                        "invalid Affected SOP Class UID in C-GET-RQ",
+                        "invalid Affected SOP Class UID in C-MOVE-RQ",
                     ))
                 }
             })?;
+        let move_destination = command
+            .move_destination
+            .clone()
+            .ok_or_else(|| DimseError::protocol("missing Move Destination in C-MOVE-RQ"))?;
+        let move_destination = AeTitle::from_str(&move_destination)?.to_string();
 
         Ok(Self {
             presentation_context_id: command.presentation_context_id,
             message_id: command
                 .message_id
-                .ok_or_else(|| DimseError::protocol("missing Message ID in C-GET-RQ"))?,
+                .ok_or_else(|| DimseError::protocol("missing Message ID in C-MOVE-RQ"))?,
             priority: command
                 .priority
-                .ok_or_else(|| DimseError::protocol("missing Priority in C-GET-RQ"))
+                .ok_or_else(|| DimseError::protocol("missing Priority in C-MOVE-RQ"))
                 .and_then(|priority| match priority {
                     Priority::Medium | Priority::High | Priority::Low => Ok(priority),
                     Priority::Unknown(raw) => Err(DimseError::protocol(format!(
-                        "invalid Priority in C-GET-RQ: 0x{raw:04X}"
+                        "invalid Priority in C-MOVE-RQ: 0x{raw:04X}"
                     ))),
                 })?,
             affected_sop_class_uid,
-            originator_ae_title: command.move_originator_ae_title.clone(),
+            move_destination,
         })
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CGetStatus {
+pub enum CMoveStatus {
     Success,
     Pending,
     RefusedOutOfResourcesUnableToCalculate,
     RefusedOutOfResourcesUnableToPerform,
+    MoveDestinationUnknown,
     IdentifierDoesNotMatchSopClass,
     UnableToProcess,
     SubOperationsCompleteOneOrMoreFailures,
 }
 
-impl CGetStatus {
+impl CMoveStatus {
     pub fn code(self) -> u16 {
         match self {
             Self::Success => 0x0000,
             Self::Pending => 0xFF00,
             Self::RefusedOutOfResourcesUnableToCalculate => 0xA701,
             Self::RefusedOutOfResourcesUnableToPerform => 0xA702,
+            Self::MoveDestinationUnknown => 0xA801,
             Self::IdentifierDoesNotMatchSopClass => 0xA900,
             Self::UnableToProcess => 0xC000,
             Self::SubOperationsCompleteOneOrMoreFailures => 0xB000,
@@ -85,12 +95,12 @@ impl CGetStatus {
     }
 }
 
-/// C-GET-RSP command payload.
+/// C-MOVE-RSP command payload.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CGetResponse {
+pub struct CMoveResponse {
     pub message_id_being_responded_to: u16,
     pub affected_sop_class_uid: String,
-    pub status: CGetStatus,
+    pub status: CMoveStatus,
     pub has_identifier: bool,
     pub remaining: Option<u16>,
     pub completed: Option<u16>,
@@ -99,8 +109,8 @@ pub struct CGetResponse {
     pub error_comment: Option<String>,
 }
 
-impl CGetResponse {
-    pub fn for_request(request: &CGetRequest, status: CGetStatus) -> Self {
+impl CMoveResponse {
+    pub fn for_request(request: &CMoveRequest, status: CMoveStatus) -> Self {
         Self {
             message_id_being_responded_to: request.message_id,
             affected_sop_class_uid: request.affected_sop_class_uid.clone(),
@@ -148,7 +158,7 @@ impl CGetResponse {
         command.put(DataElement::new(
             tags::COMMAND_FIELD,
             VR::US,
-            PrimitiveValue::from(0x8010_u16),
+            PrimitiveValue::from(0x8021_u16),
         ));
         command.put(DataElement::new(
             tags::MESSAGE_ID_BEING_RESPONDED_TO,
@@ -203,5 +213,79 @@ impl CGetResponse {
 fn put_optional_u16(object: &mut InMemDicomObject, tag: dicom_core::Tag, value: Option<u16>) {
     if let Some(value) = value {
         object.put(DataElement::new(tag, VR::US, PrimitiveValue::from(value)));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CMoveRequest, CMoveResponse, CMoveStatus};
+    use crate::message::{CommandField, DimseCommand, Priority};
+
+    fn move_command() -> DimseCommand {
+        DimseCommand {
+            presentation_context_id: 5,
+            command_field: CommandField::CMoveRq,
+            sop_class_uid: Some("1.2.840.10008.5.1.4.1.2.2.2".to_string()),
+            sop_instance_uid: None,
+            message_id: Some(19),
+            message_id_being_responded_to: None,
+            priority: Some(Priority::High),
+            status: None,
+            move_destination: Some(" DEST_AE ".to_string()),
+            move_originator_ae_title: None,
+            move_originator_message_id: None,
+            has_data_set: true,
+        }
+    }
+
+    #[test]
+    fn parses_c_move_request() {
+        let request = CMoveRequest::from_command(&move_command()).expect("valid C-MOVE-RQ");
+
+        assert_eq!(request.presentation_context_id, 5);
+        assert_eq!(request.message_id, 19);
+        assert_eq!(request.priority, Priority::High);
+        assert_eq!(request.move_destination, "DEST_AE");
+    }
+
+    #[test]
+    fn c_move_response_writes_command_fields_and_counts() {
+        let request = CMoveRequest::from_command(&move_command()).expect("valid C-MOVE-RQ");
+        let response = CMoveResponse::for_request(&request, CMoveStatus::Pending)
+            .with_counts(Some(3), 1, 2, 4)
+            .to_command_object();
+
+        assert_eq!(
+            response
+                .element(dicom_dictionary_std::tags::COMMAND_FIELD)
+                .expect("command field")
+                .to_int::<u16>()
+                .expect("US"),
+            0x8021
+        );
+        assert_eq!(
+            response
+                .element(dicom_dictionary_std::tags::MESSAGE_ID_BEING_RESPONDED_TO)
+                .expect("message id being responded to")
+                .to_int::<u16>()
+                .expect("US"),
+            19
+        );
+        assert_eq!(
+            response
+                .element(dicom_dictionary_std::tags::STATUS)
+                .expect("status")
+                .to_int::<u16>()
+                .expect("US"),
+            0xFF00
+        );
+        assert_eq!(
+            response
+                .element(dicom_dictionary_std::tags::NUMBER_OF_REMAINING_SUBOPERATIONS)
+                .expect("remaining")
+                .to_int::<u16>()
+                .expect("US"),
+            3
+        );
     }
 }

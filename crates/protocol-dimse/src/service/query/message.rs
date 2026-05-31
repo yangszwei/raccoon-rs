@@ -3,7 +3,7 @@ use dicom_dictionary_std::tags;
 use dicom_object::InMemDicomObject;
 
 use crate::error::DimseError;
-use crate::message::{CommandField, DimseCommand, Priority};
+use crate::message::{CommandField, DimseCommand, Priority, is_valid_uid};
 
 /// Parsed C-FIND-RQ command payload.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,15 +57,6 @@ impl CFindRequest {
             affected_sop_class_uid,
         })
     }
-}
-
-fn is_valid_uid(uid: &str) -> bool {
-    !uid.is_empty()
-        && uid.len() <= 64
-        && uid.bytes().all(|b| b.is_ascii_digit() || b == b'.')
-        && !uid.starts_with('.')
-        && !uid.ends_with('.')
-        && !uid.contains("..")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

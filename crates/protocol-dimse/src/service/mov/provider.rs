@@ -2,87 +2,170 @@ use std::io::Cursor;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use dicom_core::{DataElement, PrimitiveValue, Tag, VR};
+use dicom_core::{DataElement, Tag, VR};
 use dicom_dictionary_std::{tags, uids};
 use dicom_object::InMemDicomObject;
 use dicom_transfer_syntax_registry::{TransferSyntaxIndex, TransferSyntaxRegistry};
-use dicom_ul::pdu::{PDataValue, PDataValueType, PresentationContextResultReason};
 use futures_util::StreamExt;
 use raccoon_contract_dicom::{PatientId, SeriesInstanceUid, SopInstanceUid, StudyInstanceUid};
 use raccoon_service_retrieve::{
     RetrieveError, RetrieveRequest, RetrieveScope, RetrieveService, RetrievedInstance,
 };
+use thiserror::Error;
 
-use super::message::{CGetRequest, CGetResponse, CGetStatus};
+use super::message::{CMoveRequest, CMoveResponse, CMoveStatus};
 use crate::association::AssociationContext;
 use crate::error::DimseError;
 use crate::message::{CommandField, Priority};
 use crate::registry::{DescribedServiceClassProvider, ServiceBinding, ServiceClassProvider};
 
-/// Query/Retrieve C-GET SCP provider backed by `RetrieveService`.
-pub struct RetrieveServiceProvider {
+/// Outcome of one C-STORE sub-operation sent to the C-MOVE destination.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MoveStoreOutcome {
+    Success,
+    Warning,
+}
+
+#[derive(Debug)]
+pub struct MoveStoreRequest {
+    pub destination_ae_title: String,
+    pub originator_ae_title: String,
+    pub originator_message_id: u16,
+    pub message_id: u16,
+    pub priority: Priority,
+    pub instance: RetrievedInstance,
+}
+
+#[derive(Debug, Error)]
+pub enum MoveDestinationError {
+    #[error("move destination unknown")]
+    UnknownDestination,
+
+    #[error("move destination out of resources: {0}")]
+    OutOfResources(String),
+
+    #[error("move destination store failed: {0}")]
+    StoreFailed(String),
+}
+
+/// C-STORE sub-operation boundary for C-MOVE destinations.
+///
+/// Real destination resolution, association opening, and presentation-context
+/// negotiation belong behind this trait; the DIMSE provider only owns C-MOVE
+/// command handling, counters, and status mapping.
+#[async_trait]
+pub trait MoveDestinationStore: Send + Sync {
+    async fn validate_destination(&self, ae_title: &str) -> Result<(), MoveDestinationError>;
+
+    async fn store(
+        &self,
+        request: MoveStoreRequest,
+    ) -> Result<MoveStoreOutcome, MoveDestinationError>;
+}
+
+/// Query/Retrieve C-MOVE SCP provider backed by `RetrieveService`.
+pub struct MoveServiceProvider {
     retrieve: Arc<dyn RetrieveService>,
+    destination_store: Arc<dyn MoveDestinationStore>,
     bindings: Vec<ServiceBinding>,
 }
 
-impl RetrieveServiceProvider {
-    pub const DEFAULT_GET_SOP_CLASS_UIDS: &[&str] = &[
-        uids::PATIENT_ROOT_QUERY_RETRIEVE_INFORMATION_MODEL_GET,
-        uids::STUDY_ROOT_QUERY_RETRIEVE_INFORMATION_MODEL_GET,
+impl MoveServiceProvider {
+    pub const DEFAULT_MOVE_SOP_CLASS_UIDS: &[&str] = &[
+        uids::PATIENT_ROOT_QUERY_RETRIEVE_INFORMATION_MODEL_MOVE,
+        uids::STUDY_ROOT_QUERY_RETRIEVE_INFORMATION_MODEL_MOVE,
     ];
 
     pub fn new(
         retrieve: Arc<dyn RetrieveService>,
+        destination_store: Arc<dyn MoveDestinationStore>,
         sop_class_uids: impl IntoIterator<Item = impl Into<String>>,
     ) -> Self {
         Self {
             retrieve,
+            destination_store,
             bindings: sop_class_uids
                 .into_iter()
-                .map(|uid| ServiceBinding::owned(CommandField::CGetRq, uid.into()))
+                .map(|uid| ServiceBinding::owned(CommandField::CMoveRq, uid.into()))
                 .collect(),
         }
     }
 
-    pub fn with_default_get_sop_classes(retrieve: Arc<dyn RetrieveService>) -> Self {
-        Self::new(retrieve, Self::DEFAULT_GET_SOP_CLASS_UIDS.iter().copied())
+    pub fn with_default_move_sop_classes(
+        retrieve: Arc<dyn RetrieveService>,
+        destination_store: Arc<dyn MoveDestinationStore>,
+    ) -> Self {
+        Self::new(
+            retrieve,
+            destination_store,
+            Self::DEFAULT_MOVE_SOP_CLASS_UIDS.iter().copied(),
+        )
     }
 }
 
 #[async_trait]
-impl ServiceClassProvider for RetrieveServiceProvider {
-    #[tracing::instrument(skip(self, ctx), fields(command = "C-GET"))]
+impl ServiceClassProvider for MoveServiceProvider {
+    #[tracing::instrument(skip(self, ctx), fields(command = "C-MOVE"))]
     async fn handle(&self, ctx: &mut AssociationContext) -> Result<(), DimseError> {
         let command = ctx.read_command().await?;
-        let request = CGetRequest::from_command(&command)?;
+        let request = CMoveRequest::from_command(&command)?;
         let mut suboperation_message_id = next_message_id(request.message_id);
         let identifier = read_identifier(ctx, request.presentation_context_id).await?;
+        let originator_ae_title = match ctx.association().peer_ae_title() {
+            Some(title) => title.as_str().to_string(),
+            None => {
+                return send_move_response(
+                    ctx,
+                    &request,
+                    CMoveStatus::UnableToProcess,
+                    MoveResponseCounts::final_error(),
+                    Some("missing C-MOVE originator AE title".to_string()),
+                    None,
+                )
+                .await;
+            }
+        };
+        if let Err(error) = self
+            .destination_store
+            .validate_destination(&request.move_destination)
+            .await
+        {
+            return send_move_response(
+                ctx,
+                &request,
+                destination_error_status(&error),
+                MoveResponseCounts::final_error(),
+                Some(error.to_string()),
+                None,
+            )
+            .await;
+        }
         let retrieve_requests = match build_retrieve_requests(&request, &identifier) {
             Ok(requests) => requests,
             Err(error) => {
-                return send_get_response(
+                return send_move_response(
                     ctx,
                     &request,
-                    CGetStatus::IdentifierDoesNotMatchSopClass,
-                    GetResponseCounts::final_error(),
+                    CMoveStatus::IdentifierDoesNotMatchSopClass,
+                    MoveResponseCounts::final_error(),
                     Some(error),
                     None,
                 )
                 .await;
             }
         };
-        tracing::debug!(stage = "validate", "C-GET request validated");
+        tracing::debug!(stage = "validate", "C-MOVE request validated");
 
         let mut results = Vec::new();
         for retrieve_request in retrieve_requests {
             match self.retrieve.retrieve(retrieve_request).await {
                 Ok(result) => results.push(result),
                 Err(error) => {
-                    return send_get_response(
+                    return send_move_response(
                         ctx,
                         &request,
                         retrieve_error_status(&error),
-                        GetResponseCounts::final_error(),
+                        MoveResponseCounts::final_error(),
                         Some(error.to_string()),
                         None,
                     )
@@ -109,22 +192,31 @@ impl ServiceClassProvider for RetrieveServiceProvider {
                             instance.identity.sop_instance_uid.as_str().to_string();
                         let message_id = suboperation_message_id;
                         suboperation_message_id = next_message_id(suboperation_message_id);
-                        match send_store_suboperation(ctx, &request, message_id, instance).await {
-                            Ok(CStoreSubOperationStatus::Success) => {
+                        match self
+                            .destination_store
+                            .store(MoveStoreRequest {
+                                destination_ae_title: request.move_destination.clone(),
+                                originator_ae_title: originator_ae_title.clone(),
+                                originator_message_id: request.message_id,
+                                message_id,
+                                priority: request.priority,
+                                instance,
+                            })
+                            .await
+                        {
+                            Ok(MoveStoreOutcome::Success) => {
                                 completed = completed.saturating_add(1)
                             }
-                            Ok(CStoreSubOperationStatus::Warning) => {
-                                warning = warning.saturating_add(1)
-                            }
+                            Ok(MoveStoreOutcome::Warning) => warning = warning.saturating_add(1),
                             Err(error) => {
-                                tracing::warn!(stage = "suboperation", error = %error, "C-GET C-STORE sub-operation failed");
+                                tracing::warn!(stage = "suboperation", error = %error, "C-MOVE C-STORE sub-operation failed");
                                 failed = failed.saturating_add(1);
                                 failed_sop_instance_uids.push(sop_instance_uid);
                             }
                         }
                     }
                     Err(error) => {
-                        tracing::warn!(stage = "backend_stream", error = %error, "C-GET retrieve stream failed");
+                        tracing::warn!(stage = "backend_stream", error = %error, "C-MOVE retrieve stream failed");
                         failed = failed.saturating_add(1);
                         if let RetrieveError::ObjectStoreForInstance {
                             sop_instance_uid, ..
@@ -136,11 +228,11 @@ impl ServiceClassProvider for RetrieveServiceProvider {
                 }
                 let done = completed.saturating_add(failed).saturating_add(warning);
                 if done < total {
-                    send_get_response(
+                    send_move_response(
                         ctx,
                         &request,
-                        CGetStatus::Pending,
-                        GetResponseCounts {
+                        CMoveStatus::Pending,
+                        MoveResponseCounts {
                             remaining: Some(total.saturating_sub(done)),
                             completed,
                             failed,
@@ -155,20 +247,20 @@ impl ServiceClassProvider for RetrieveServiceProvider {
         }
 
         let status = if failed == 0 && warning == 0 {
-            CGetStatus::Success
+            CMoveStatus::Success
         } else {
-            CGetStatus::SubOperationsCompleteOneOrMoreFailures
+            CMoveStatus::SubOperationsCompleteOneOrMoreFailures
         };
         let failed_identifier = if failed_sop_instance_uids.is_empty() {
             None
         } else {
             Some(failed_sop_instance_uid_list(&failed_sop_instance_uids))
         };
-        send_get_response(
+        send_move_response(
             ctx,
             &request,
             status,
-            GetResponseCounts {
+            MoveResponseCounts {
                 remaining: None,
                 completed,
                 failed,
@@ -181,26 +273,26 @@ impl ServiceClassProvider for RetrieveServiceProvider {
     }
 }
 
-impl DescribedServiceClassProvider for RetrieveServiceProvider {
+impl DescribedServiceClassProvider for MoveServiceProvider {
     fn bindings(&self) -> &[ServiceBinding] {
         &self.bindings
     }
 }
 
-async fn send_get_response(
+async fn send_move_response(
     ctx: &mut AssociationContext,
-    request: &CGetRequest,
-    status: CGetStatus,
-    counts: GetResponseCounts,
+    request: &CMoveRequest,
+    status: CMoveStatus,
+    counts: MoveResponseCounts,
     comment: Option<String>,
     identifier: Option<&InMemDicomObject>,
 ) -> Result<(), DimseError> {
-    let remaining = if counts.remaining.is_none() && status != CGetStatus::Pending {
+    let remaining = if counts.remaining.is_none() && status != CMoveStatus::Pending {
         Some(0)
     } else {
         counts.remaining
     };
-    let mut response = CGetResponse::for_request(request, status).with_counts(
+    let mut response = CMoveResponse::for_request(request, status).with_counts(
         remaining,
         counts.completed,
         counts.failed,
@@ -227,14 +319,14 @@ async fn send_get_response(
 }
 
 #[derive(Debug, Clone, Copy)]
-struct GetResponseCounts {
+struct MoveResponseCounts {
     remaining: Option<u16>,
     completed: u16,
     failed: u16,
     warning: u16,
 }
 
-impl GetResponseCounts {
+impl MoveResponseCounts {
     fn final_error() -> Self {
         Self {
             remaining: None,
@@ -243,157 +335,6 @@ impl GetResponseCounts {
             warning: 0,
         }
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CStoreSubOperationStatus {
-    Success,
-    Warning,
-}
-
-async fn send_store_suboperation(
-    ctx: &mut AssociationContext,
-    get_request: &CGetRequest,
-    c_store_message_id: u16,
-    instance: RetrievedInstance,
-) -> Result<CStoreSubOperationStatus, DimseError> {
-    let sop_class_uid = instance.identity.sop_class_uid.as_str();
-    let stored_transfer_syntax_uid = instance
-        .transfer_syntax_uid
-        .as_ref()
-        .map(|uid| uid.as_str());
-    let presentation_context_id = ctx
-        .association()
-        .presentation_contexts()
-        .iter()
-        .find(|pc| {
-            pc.abstract_syntax == sop_class_uid
-                && pc.reason == PresentationContextResultReason::Acceptance
-                && stored_transfer_syntax_uid.is_none_or(|uid| pc.transfer_syntax == uid)
-        })
-        .map(|pc| pc.id)
-        .ok_or_else(|| {
-            if let Some(uid) = stored_transfer_syntax_uid {
-                DimseError::protocol(format!(
-                    "no accepted presentation context for retrieved SOP Class UID {sop_class_uid} with Transfer Syntax UID {uid}"
-                ))
-            } else {
-                DimseError::protocol(format!(
-                    "no accepted presentation context for retrieved SOP Class UID {sop_class_uid}"
-                ))
-            }
-        })?;
-
-    let command = c_store_request_command(
-        c_store_message_id,
-        sop_class_uid,
-        instance.identity.sop_instance_uid.as_str(),
-        Some(
-            get_request
-                .originator_ae_title
-                .as_deref()
-                .or_else(|| {
-                    ctx.association()
-                        .peer_ae_title()
-                        .map(|title| title.as_str())
-                })
-                .unwrap_or_else(|| ctx.association().called_ae_title().as_str()),
-        ),
-        get_request.message_id,
-        get_request.priority,
-    );
-    ctx.send_command_object(presentation_context_id, &command)
-        .await?;
-
-    let mut payload = Vec::with_capacity(instance.content_length.min(usize::MAX as u64) as usize);
-    let mut body = instance.body;
-    while let Some(chunk) = body.next().await {
-        let chunk = chunk.map_err(|error| DimseError::protocol(error.to_string()))?;
-        payload.extend_from_slice(&chunk);
-    }
-    ctx.send_data_pdv(PDataValue {
-        presentation_context_id,
-        value_type: PDataValueType::Data,
-        is_last: true,
-        data: payload,
-    })
-    .await?;
-
-    let response = ctx.read_suboperation_command().await?;
-    if response.command_field != CommandField::CStoreRsp {
-        return Err(DimseError::protocol(format!(
-            "expected C-STORE-RSP, got {}",
-            response.command_field
-        )));
-    }
-    let status = response
-        .status
-        .ok_or_else(|| DimseError::protocol("C-STORE-RSP missing Status"))?;
-    let outcome = match status {
-        0x0000 => CStoreSubOperationStatus::Success,
-        0xB000..=0xBFFF => CStoreSubOperationStatus::Warning,
-        status => {
-            return Err(DimseError::protocol(format!(
-                "C-STORE sub-operation failed with status 0x{status:04X}"
-            )));
-        }
-    };
-    ctx.complete_message_cycle()?;
-    Ok(outcome)
-}
-
-fn c_store_request_command(
-    message_id: u16,
-    sop_class_uid: &str,
-    sop_instance_uid: &str,
-    move_originator_ae_title: Option<&str>,
-    move_originator_message_id: u16,
-    priority: Priority,
-) -> InMemDicomObject {
-    let mut command = InMemDicomObject::new_empty();
-    command.put(DataElement::new(
-        tags::AFFECTED_SOP_CLASS_UID,
-        VR::UI,
-        sop_class_uid,
-    ));
-    command.put(DataElement::new(
-        tags::COMMAND_FIELD,
-        VR::US,
-        PrimitiveValue::from(0x0001_u16),
-    ));
-    command.put(DataElement::new(
-        tags::MESSAGE_ID,
-        VR::US,
-        PrimitiveValue::from(message_id),
-    ));
-    command.put(DataElement::new(
-        tags::PRIORITY,
-        VR::US,
-        priority_code(priority),
-    ));
-    command.put(DataElement::new(
-        tags::COMMAND_DATA_SET_TYPE,
-        VR::US,
-        PrimitiveValue::from(0x0000_u16),
-    ));
-    command.put(DataElement::new(
-        tags::AFFECTED_SOP_INSTANCE_UID,
-        VR::UI,
-        sop_instance_uid,
-    ));
-    if let Some(title) = move_originator_ae_title {
-        command.put(DataElement::new(
-            tags::MOVE_ORIGINATOR_APPLICATION_ENTITY_TITLE,
-            VR::AE,
-            title,
-        ));
-        command.put(DataElement::new(
-            tags::MOVE_ORIGINATOR_MESSAGE_ID,
-            VR::US,
-            PrimitiveValue::from(move_originator_message_id),
-        ));
-    }
-    command
 }
 
 fn next_message_id(message_id: u16) -> u16 {
@@ -421,10 +362,10 @@ async fn read_identifier(
         .iter()
         .find(|pc| pc.id == presentation_context_id)
         .map(|pc| pc.transfer_syntax.as_str())
-        .ok_or_else(|| DimseError::protocol("missing presentation context for C-GET"))?;
+        .ok_or_else(|| DimseError::protocol("missing presentation context for C-MOVE"))?;
     let transfer_syntax = TransferSyntaxRegistry
         .get(transfer_syntax_uid)
-        .ok_or_else(|| DimseError::protocol("unsupported C-GET transfer syntax"))?;
+        .ok_or_else(|| DimseError::protocol("unsupported C-MOVE transfer syntax"))?;
 
     let mut payload = Vec::new();
     while let Some(pdv) = ctx.read_data_pdv().await? {
@@ -435,12 +376,12 @@ async fn read_identifier(
 }
 
 fn build_retrieve_requests(
-    request: &CGetRequest,
+    request: &CMoveRequest,
     identifier: &InMemDicomObject,
 ) -> Result<Vec<RetrieveRequest>, String> {
     let level = required_string(identifier, tags::QUERY_RETRIEVE_LEVEL)?;
     let scopes = match (request.affected_sop_class_uid.as_str(), level.as_str()) {
-        (uids::PATIENT_ROOT_QUERY_RETRIEVE_INFORMATION_MODEL_GET, "PATIENT") => {
+        (uids::PATIENT_ROOT_QUERY_RETRIEVE_INFORMATION_MODEL_MOVE, "PATIENT") => {
             vec![RetrieveScope::Patient {
                 patient_id: PatientId::new(required_string(identifier, tags::PATIENT_ID)?)
                     .map_err(|e| e.to_string())?,
@@ -504,22 +445,23 @@ fn required_strings(object: &InMemDicomObject, tag: Tag) -> Result<Vec<String>, 
     Ok(values)
 }
 
-fn priority_code(priority: Priority) -> PrimitiveValue {
-    PrimitiveValue::from(match priority {
-        Priority::Medium => 0x0000_u16,
-        Priority::High => 0x0001_u16,
-        Priority::Low => 0x0002_u16,
-        Priority::Unknown(raw) => raw,
-    })
+fn retrieve_error_status(error: &RetrieveError) -> CMoveStatus {
+    match error {
+        RetrieveError::Repository(_) => CMoveStatus::RefusedOutOfResourcesUnableToPerform,
+        RetrieveError::InvalidRequest(_) => CMoveStatus::IdentifierDoesNotMatchSopClass,
+        RetrieveError::ObjectStore(_) | RetrieveError::ObjectStoreForInstance { .. } => {
+            CMoveStatus::UnableToProcess
+        }
+        _ => CMoveStatus::UnableToProcess,
+    }
 }
 
-fn retrieve_error_status(error: &RetrieveError) -> CGetStatus {
+fn destination_error_status(error: &MoveDestinationError) -> CMoveStatus {
     match error {
-        RetrieveError::Repository(_) => CGetStatus::RefusedOutOfResourcesUnableToPerform,
-        RetrieveError::InvalidRequest(_) => CGetStatus::IdentifierDoesNotMatchSopClass,
-        RetrieveError::ObjectStore(_) | RetrieveError::ObjectStoreForInstance { .. } => {
-            CGetStatus::UnableToProcess
+        MoveDestinationError::UnknownDestination => CMoveStatus::MoveDestinationUnknown,
+        MoveDestinationError::OutOfResources(_) => {
+            CMoveStatus::RefusedOutOfResourcesUnableToPerform
         }
-        _ => CGetStatus::UnableToProcess,
+        MoveDestinationError::StoreFailed(_) => CMoveStatus::UnableToProcess,
     }
 }

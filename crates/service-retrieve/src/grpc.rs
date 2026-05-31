@@ -510,7 +510,10 @@ async fn stream_retrieve_result(
                     }
                 }
             }
-            Err(RetrieveError::ObjectStore(e)) => {
+            Err(
+                RetrieveError::ObjectStore(e)
+                | RetrieveError::ObjectStoreForInstance { source: e, .. },
+            ) => {
                 send_response(
                     response_tx,
                     proto::RetrieveResponse {
@@ -730,7 +733,9 @@ fn retrieve_error_to_status(error: RetrieveError) -> Status {
     match error {
         RetrieveError::InvalidRequest(msg) => Status::invalid_argument(msg),
         RetrieveError::Repository(e) => Status::internal(e.to_string()),
-        RetrieveError::ObjectStore(e) => Status::internal(e.to_string()),
+        RetrieveError::ObjectStore(e) | RetrieveError::ObjectStoreForInstance { source: e, .. } => {
+            Status::internal(e.to_string())
+        }
     }
 }
 

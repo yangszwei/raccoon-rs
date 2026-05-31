@@ -6,7 +6,7 @@ use dicom_object::InMemDicomObject;
 use raccoon_service_application_entity_registry::AeTitle;
 
 use crate::error::DimseError;
-use crate::message::{CommandField, DimseCommand, Priority};
+use crate::message::{CommandField, DimseCommand, Priority, is_valid_uid};
 
 const MAX_ERROR_COMMENT_CHARS: usize = 64;
 
@@ -210,15 +210,6 @@ impl CStoreResponse {
         }
         command
     }
-}
-
-pub(super) fn is_valid_uid(uid: &str) -> bool {
-    !uid.is_empty()
-        && uid.len() <= 64
-        && uid.bytes().all(|b| b.is_ascii_digit() || b == b'.')
-        && !uid.starts_with('.')
-        && !uid.ends_with('.')
-        && !uid.contains("..")
 }
 
 #[cfg(test)]

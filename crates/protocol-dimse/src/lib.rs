@@ -29,7 +29,8 @@ pub use registry::{
 };
 pub use service::{
     CEchoRequest, CEchoResponse, CFindRequest, CFindResponse, CFindStatus, CGetRequest,
-    CGetResponse, CGetStatus, CStoreRequest, CStoreResponse, CStoreStatus, QueryServiceProvider,
-    RetrieveServiceProvider, StorageServiceProvider, VerificationServiceProvider,
-    verification_provider,
+    CGetResponse, CGetStatus, CMoveRequest, CMoveResponse, CMoveStatus, CStoreRequest,
+    CStoreResponse, CStoreStatus, MoveDestinationError, MoveDestinationStore, MoveServiceProvider,
+    MoveStoreOutcome, MoveStoreRequest, QueryServiceProvider, RetrieveServiceProvider,
+    StorageServiceProvider, VerificationServiceProvider, verification_provider,
 };

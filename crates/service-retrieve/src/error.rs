@@ -1,4 +1,4 @@
-use raccoon_contract_dicom::PatientIdError;
+use raccoon_contract_dicom::{PatientIdError, SopInstanceUid};
 use raccoon_contract_object_store::ObjectStoreError;
 use thiserror::Error;
 
@@ -69,6 +69,13 @@ pub enum RetrieveError {
 
     #[error("object store error: {0}")]
     ObjectStore(#[from] ObjectStoreError),
+
+    #[error("object store error for SOP Instance UID {sop_instance_uid}: {source}")]
+    ObjectStoreForInstance {
+        sop_instance_uid: SopInstanceUid,
+        #[source]
+        source: ObjectStoreError,
+    },
 }
 
 impl From<PatientIdError> for RetrieveError {
