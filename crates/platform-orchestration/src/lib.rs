@@ -7,6 +7,7 @@
 //! internal role.
 
 pub mod adapter;
+pub mod app;
 pub mod contract;
 pub mod error;
 pub mod platform;

@@ -1967,6 +1967,10 @@ dependencies = [
 [[package]]
 name = "raccoon"
 version = "0.1.0"
+dependencies = [
+ "raccoon-platform-orchestration",
+ "tokio",
+]
 
 [[package]]
 name = "raccoon-adapter-ingest-repository-sqlite"
@@ -2059,9 +2063,12 @@ dependencies = [
  "raccoon-service-query",
  "raccoon-service-retrieve",
  "raccoon-service-sync",
+ "tempfile",
  "thiserror",
  "tokio",
+ "tokio-util",
  "tonic",
+ "tracing",
 ]
 
 [[package]]

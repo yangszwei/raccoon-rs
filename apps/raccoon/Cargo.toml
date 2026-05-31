@@ -4,3 +4,5 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+raccoon-platform-orchestration = { path = "../../crates/platform-orchestration" }
+tokio = { version = "1.52.1", features = ["macros", "rt-multi-thread"] }

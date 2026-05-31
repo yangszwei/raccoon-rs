@@ -21,7 +21,7 @@ use crate::error::OrchestrationError;
 
 /// Build the application entity registry from loaded configuration.
 pub fn build_application_entity_registry(
-    config: ApplicationEntitiesConfig,
+    config: &ApplicationEntitiesConfig,
 ) -> Result<InMemoryApplicationEntityRegistry, OrchestrationError> {
     InMemoryApplicationEntityRegistry::try_new(
         map_application_entities(&config.local, map_local_application_entity)?,

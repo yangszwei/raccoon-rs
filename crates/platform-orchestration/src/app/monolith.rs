@@ -1,0 +1,269 @@
+use std::convert::Infallible;
+use std::sync::Arc;
+
+use raccoon_platform_config::app::MonolithConfig;
+use raccoon_platform_runtime::{App, FatalError};
+use raccoon_protocol_dimse::{DimseListener, ServiceClassRegistry};
+use raccoon_service_application_entity_registry::ApplicationEntityRegistry;
+use raccoon_service_sync::{SyncService, SyncWorkerId};
+use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
+use tracing::{debug, warn};
+
+use crate::adapter::ingest_repository_sqlite::build_sqlite_ingest_repository;
+use crate::adapter::read_sqlite::build_sqlite_read_repository;
+use crate::contract::object_store::build_object_store;
+use crate::error::OrchestrationError;
+use crate::protocol::dimse::{bind_dimse_listener, build_dimse_service_registry};
+use crate::service::application_entity_registry::build_application_entity_registry;
+use crate::service::ingest::build_ingest_service;
+use crate::service::query::build_query_service;
+use crate::service::retrieve::build_retrieve_service;
+use crate::service::sync::build_sync_service;
+
+/// Runnable monolith application assembled from concrete Raccoon components.
+pub struct MonolithApp {
+    sync_service: Arc<dyn SyncService>,
+    dimse_endpoints: Vec<DimseEndpoint>,
+}
+
+struct DimseEndpoint {
+    listener: Arc<DimseListener>,
+    registry: Arc<ServiceClassRegistry>,
+    max_concurrent_associations: usize,
+}
+
+/// Build the monolith application from loaded configuration.
+pub async fn build_monolith_app(
+    config: &MonolithConfig,
+) -> Result<MonolithApp, OrchestrationError> {
+    let object_store = build_object_store(&config.storage, &config.filesystem);
+
+    let ingest_repository = Arc::new(build_sqlite_ingest_repository(&config.filesystem).await?);
+    let read_repository = Arc::new(build_sqlite_read_repository(&config.filesystem).await?);
+
+    let ingest_service = build_ingest_service(object_store.clone(), ingest_repository.clone());
+    let query_service = build_query_service(read_repository.clone());
+    let retrieve_service = build_retrieve_service(read_repository.clone(), object_store.clone());
+    let sync_service = build_sync_service(
+        ingest_repository.clone(),
+        read_repository,
+        ingest_repository,
+        object_store,
+    );
+
+    let application_entity_registry =
+        build_application_entity_registry(&config.application_entities)?;
+    let local_aes = application_entity_registry
+        .locals()
+        .cloned()
+        .collect::<Vec<_>>();
+    let application_entity_registry: Arc<dyn ApplicationEntityRegistry + Send + Sync> =
+        Arc::new(application_entity_registry);
+
+    let mut dimse_endpoints = Vec::with_capacity(local_aes.len());
+    for local_ae in local_aes {
+        let max_concurrent_associations = local_ae.max_concurrent_associations();
+        let registry = Arc::new(build_dimse_service_registry(
+            ingest_service.clone(),
+            query_service.clone(),
+            retrieve_service.clone(),
+            application_entity_registry.clone(),
+            local_ae.clone(),
+        ));
+        let listener = Arc::new(bind_dimse_listener(&local_ae, registry.as_ref()).await?);
+
+        dimse_endpoints.push(DimseEndpoint {
+            listener,
+            registry,
+            max_concurrent_associations,
+        });
+    }
+
+    Ok(MonolithApp {
+        sync_service,
+        dimse_endpoints,
+    })
+}
+
+impl App for MonolithApp {
+    type ShutdownError = Infallible;
+
+    fn start(
+        &self,
+        shutdown: CancellationToken,
+        task_tracker: &TaskTracker,
+        fatal_tx: mpsc::UnboundedSender<FatalError>,
+    ) {
+        start_sync_worker(
+            self.sync_service.clone(),
+            shutdown.clone(),
+            task_tracker,
+            fatal_tx,
+        );
+
+        for endpoint in &self.dimse_endpoints {
+            start_dimse_workers(endpoint, shutdown.clone(), task_tracker);
+        }
+    }
+
+    async fn shutdown(&self) -> Result<(), Self::ShutdownError> {
+        Ok(())
+    }
+}
+
+fn start_sync_worker(
+    sync_service: Arc<dyn SyncService>,
+    shutdown: CancellationToken,
+    task_tracker: &TaskTracker,
+    fatal_tx: mpsc::UnboundedSender<FatalError>,
+) {
+    task_tracker.spawn(async move {
+        let worker_id = SyncWorkerId::new("monolith-sync-1");
+        if let Err(error) = sync_service.run_until_shutdown(worker_id, shutdown).await {
+            let _ = fatal_tx.send(FatalError::new("sync", "worker", error));
+        }
+    });
+}
+
+fn start_dimse_workers(
+    endpoint: &DimseEndpoint,
+    shutdown: CancellationToken,
+    task_tracker: &TaskTracker,
+) {
+    for worker_index in 0..endpoint.max_concurrent_associations {
+        let listener = endpoint.listener.clone();
+        let registry = endpoint.registry.clone();
+        let shutdown = shutdown.clone();
+
+        task_tracker.spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = shutdown.cancelled() => {
+                        debug!(dimse.worker_index = worker_index, "DIMSE worker stopping");
+                        return;
+                    }
+                    result = listener.accept_and_serve(registry.as_ref()) => {
+                        if let Err(error) = result {
+                            warn!(
+                                dimse.worker_index = worker_index,
+                                error = %error,
+                                "DIMSE association failed"
+                            );
+                        }
+                    }
+                }
+            }
+        });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use raccoon_platform_config::app::MonolithConfig;
+    use raccoon_platform_config::component::application_entities::LocalApplicationEntityConfig;
+    use raccoon_platform_runtime::{Runtime, RuntimeConfig};
+    use tempfile::TempDir;
+
+    use super::*;
+
+    fn test_config(filesystem_root: &TempDir) -> MonolithConfig {
+        let mut config = MonolithConfig::default();
+        config.filesystem.root = filesystem_root.path().to_path_buf();
+        config.application_entities.local = vec![LocalApplicationEntityConfig {
+            bind_address: "127.0.0.1:0".to_string(),
+            max_concurrent_associations: 1,
+            ..LocalApplicationEntityConfig::default()
+        }];
+        config
+    }
+
+    #[tokio::test]
+    async fn build_monolith_app_binds_configured_dimse_listener() {
+        let filesystem_root = tempfile::tempdir().expect("filesystem root");
+        let config = test_config(&filesystem_root);
+
+        let app = build_monolith_app(&config)
+            .await
+            .expect("monolith app builds");
+
+        assert_eq!(app.dimse_endpoints.len(), 1);
+        let local_addr = app.dimse_endpoints[0]
+            .listener
+            .local_addr()
+            .expect("listener has local address");
+        assert_eq!(local_addr.ip().to_string(), "127.0.0.1");
+        assert_ne!(local_addr.port(), 0);
+        assert!(filesystem_root.path().join("ingest.db").exists());
+        assert!(filesystem_root.path().join("read.db").exists());
+
+        let supported_syntaxes = app.dimse_endpoints[0]
+            .registry
+            .supported_abstract_syntax_uids();
+        assert!(
+            supported_syntaxes
+                .iter()
+                .any(|uid| uid == "1.2.840.10008.5.1.4.1.2.1.2")
+        );
+        assert!(
+            supported_syntaxes
+                .iter()
+                .any(|uid| uid == "1.2.840.10008.5.1.4.1.2.2.2")
+        );
+    }
+
+    #[tokio::test]
+    async fn build_monolith_app_rejects_duplicate_application_entities() {
+        let filesystem_root = tempfile::tempdir().expect("filesystem root");
+        let mut config = test_config(&filesystem_root);
+        config
+            .application_entities
+            .local
+            .push(LocalApplicationEntityConfig {
+                bind_address: "127.0.0.1:0".to_string(),
+                ..LocalApplicationEntityConfig::default()
+            });
+
+        let error = match build_monolith_app(&config).await {
+            Ok(_) => panic!("duplicate AE should fail"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            OrchestrationError::ApplicationEntityRegistry(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn monolith_app_shuts_down_under_runtime() {
+        let filesystem_root = tempfile::tempdir().expect("filesystem root");
+        let config = test_config(&filesystem_root);
+        let app = build_monolith_app(&config)
+            .await
+            .expect("monolith app builds");
+        let runtime = Arc::new(Runtime::new(
+            app,
+            RuntimeConfig {
+                shutdown_timeout_seconds: 1,
+                force_exit_on_timeout: true,
+            },
+        ));
+
+        let runner = {
+            let runtime = runtime.clone();
+            tokio::spawn(async move { runtime.start().await })
+        };
+
+        tokio::task::yield_now().await;
+        runtime.shutdown();
+
+        runner
+            .await
+            .expect("runtime task joins")
+            .expect("runtime shuts down");
+    }
+}

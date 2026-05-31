@@ -26,5 +26,10 @@ raccoon-service-query = { path = "../service-query" }
 raccoon-service-retrieve = { path = "../service-retrieve" }
 raccoon-service-sync = { path = "../service-sync" }
 thiserror = "2.0.18"
-tokio = { version = "1.52.1", features = ["signal"] }
+tokio = { version = "1.52.1", features = ["fs", "rt", "signal", "sync"] }
+tokio-util = { version = "0.7.18", features = ["rt"] }
 tonic = { version = "0.14.6", optional = true }
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile = "3.23.0"
