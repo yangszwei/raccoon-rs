@@ -2020,6 +2020,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "raccoon-application-entity-registry"
+version = "0.1.0"
+dependencies = [
+ "raccoon-platform-orchestration",
+ "tokio",
+]
+
+[[package]]
 name = "raccoon-contract-dicom"
 version = "0.1.0"
 dependencies = [
@@ -2034,6 +2042,14 @@ dependencies = [
  "bytes",
  "futures-core",
  "thiserror",
+ "tokio",
+]
+
+[[package]]
+name = "raccoon-ingest"
+version = "0.1.0"
+dependencies = [
+ "raccoon-platform-orchestration",
  "tokio",
 ]
 
@@ -2066,6 +2082,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "tokio-stream",
  "tokio-util",
  "tonic",
  "tracing",
@@ -2114,6 +2131,22 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "raccoon-query"
+version = "0.1.0"
+dependencies = [
+ "raccoon-platform-orchestration",
+ "tokio",
+]
+
+[[package]]
+name = "raccoon-retrieve"
+version = "0.1.0"
+dependencies = [
+ "raccoon-platform-orchestration",
+ "tokio",
 ]
 
 [[package]]
@@ -2226,6 +2259,14 @@ dependencies = [
  "tonic-prost-build",
  "tracing",
  "tracing-opentelemetry",
+]
+
+[[package]]
+name = "raccoon-sync"
+version = "0.1.0"
+dependencies = [
+ "raccoon-platform-orchestration",
+ "tokio",
 ]
 
 [[package]]

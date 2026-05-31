@@ -7,7 +7,13 @@ edition.workspace = true
 default = []
 grpc = [
     "dep:tonic",
+    "dep:tokio-stream",
     "raccoon-service-application-entity-registry/grpc",
+    "raccoon-service-ingest/grpc",
+    "raccoon-service-query/grpc",
+    "raccoon-service-retrieve/grpc",
+    "raccoon-service-sync/grpc",
+    "tokio/net",
     "tokio/sync",
 ]
 
@@ -27,6 +33,7 @@ raccoon-service-retrieve = { path = "../service-retrieve" }
 raccoon-service-sync = { path = "../service-sync" }
 thiserror = "2.0.18"
 tokio = { version = "1.52.1", features = ["fs", "rt", "signal", "sync"] }
+tokio-stream = { version = "0.1.17", features = ["net"], optional = true }
 tokio-util = { version = "0.7.18", features = ["rt"] }
 tonic = { version = "0.14.6", optional = true }
 tracing.workspace = true

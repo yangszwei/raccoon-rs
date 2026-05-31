@@ -11,9 +11,9 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 use tracing::{debug, warn};
 
-use crate::adapter::ingest_repository_sqlite::build_sqlite_ingest_repository;
-use crate::adapter::read_sqlite::build_sqlite_read_repository;
+use crate::contract::ingest_repository::build_ingest_repository_handles;
 use crate::contract::object_store::build_object_store;
+use crate::contract::read_repository::build_read_repository_handles;
 use crate::error::OrchestrationError;
 use crate::protocol::dimse::{bind_dimse_listener, build_dimse_service_registry};
 use crate::service::application_entity_registry::build_application_entity_registry;
@@ -40,16 +40,20 @@ pub async fn build_monolith_app(
 ) -> Result<MonolithApp, OrchestrationError> {
     let object_store = build_object_store(&config.storage, &config.filesystem);
 
-    let ingest_repository = Arc::new(build_sqlite_ingest_repository(&config.filesystem).await?);
-    let read_repository = Arc::new(build_sqlite_read_repository(&config.filesystem).await?);
+    let ingest_repositories = build_ingest_repository_handles(&config.filesystem).await?;
+    let read_repositories = build_read_repository_handles(&config.filesystem).await?;
 
-    let ingest_service = build_ingest_service(object_store.clone(), ingest_repository.clone());
-    let query_service = build_query_service(read_repository.clone());
-    let retrieve_service = build_retrieve_service(read_repository.clone(), object_store.clone());
+    let ingest_service = build_ingest_service(
+        object_store.clone(),
+        ingest_repositories.ingest_repository.clone(),
+    );
+    let query_service = build_query_service(read_repositories.query_repository);
+    let retrieve_service =
+        build_retrieve_service(read_repositories.retrieve_repository, object_store.clone());
     let sync_service = build_sync_service(
-        ingest_repository.clone(),
-        read_repository,
-        ingest_repository,
+        ingest_repositories.sync_source_repository,
+        read_repositories.sync_read_model_writer,
+        ingest_repositories.sync_quarantine_repository,
         object_store,
     );
 
