@@ -1,0 +1,24 @@
+[package]
+name = "raccoon-service-sync"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+async-trait = "0.1.89"
+dicom-core = "0.9.1"
+dicom-dictionary-std = "0.9.0"
+dicom-json = "0.9.0"
+dicom-object = "0.9.1"
+futures-util = "0.3.31"
+raccoon-contract-dicom = { path = "../contract-dicom" }
+raccoon-contract-object-store = { path = "../contract-object-store" }
+raccoon-service-ingest = { path = "../service-ingest" }
+serde_json = "1.0"
+thiserror = "2.0.18"
+tokio = { version = "1.52.3", features = ["rt", "time"] }
+tokio-util = "0.7.17"
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile = "3.23.0"
+tokio = { version = "1.52.3", features = ["macros", "rt", "time"] }
