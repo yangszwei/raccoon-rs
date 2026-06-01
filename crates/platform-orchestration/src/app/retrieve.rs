@@ -12,6 +12,7 @@ use tokio_util::task::TaskTracker;
 use tonic::transport::Server;
 
 use crate::app::grpc::{bind_grpc_listener, start_grpc_server};
+use crate::component::object_store::ingest_object_store_root;
 use crate::contract::object_store::build_object_store;
 use crate::contract::read_repository::build_read_repository_handles;
 use crate::error::OrchestrationError;
@@ -35,7 +36,10 @@ impl RetrieveApp {
 pub async fn build_retrieve_app(
     config: &RetrieveServiceConfig,
 ) -> Result<RetrieveApp, OrchestrationError> {
-    let object_store = build_object_store(&config.storage, &config.filesystem);
+    let object_store = build_object_store(
+        &config.storage,
+        ingest_object_store_root(&config.filesystem),
+    );
     let repositories = build_read_repository_handles(&config.filesystem).await?;
     let service = build_retrieve_service(repositories.retrieve_repository, object_store);
     let (local_addr, incoming) = bind_grpc_listener(&config.grpc).await?;

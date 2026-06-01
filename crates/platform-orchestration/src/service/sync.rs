@@ -13,11 +13,13 @@ pub fn build_sync_service(
     read_model_writer: Arc<dyn SyncReadModelWriter>,
     quarantine_repository: Arc<dyn SyncQuarantineRepository>,
     object_store: ObjectStoreHandle,
+    quarantine_object_store: ObjectStoreHandle,
 ) -> Arc<dyn SyncService> {
     Arc::new(StandardSyncService::new(
         source_repository,
         read_model_writer,
         quarantine_repository,
         object_store,
+        quarantine_object_store,
     ))
 }

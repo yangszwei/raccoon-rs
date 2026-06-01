@@ -8,6 +8,7 @@
 
 pub mod adapter;
 pub mod app;
+pub mod component;
 pub mod contract;
 pub mod error;
 pub mod platform;

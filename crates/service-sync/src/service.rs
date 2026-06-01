@@ -32,6 +32,7 @@ pub struct StandardSyncService {
     read_model_writer: Arc<dyn SyncReadModelWriter>,
     quarantine_repository: Arc<dyn SyncQuarantineRepository>,
     object_store: Arc<dyn ObjectStore>,
+    quarantine_object_store: Arc<dyn ObjectStore>,
     parser: Arc<dyn SyncObjectParser>,
     key_builder: SyncQuarantineKeyBuilder,
     options: SyncServiceOptions,
@@ -43,12 +44,14 @@ impl StandardSyncService {
         read_model_writer: Arc<dyn SyncReadModelWriter>,
         quarantine_repository: Arc<dyn SyncQuarantineRepository>,
         object_store: Arc<dyn ObjectStore>,
+        quarantine_object_store: Arc<dyn ObjectStore>,
     ) -> Self {
         Self::new_with_options(
             source_repository,
             read_model_writer,
             quarantine_repository,
             object_store,
+            quarantine_object_store,
             SyncServiceOptions::default(),
         )
     }
@@ -58,6 +61,7 @@ impl StandardSyncService {
         read_model_writer: Arc<dyn SyncReadModelWriter>,
         quarantine_repository: Arc<dyn SyncQuarantineRepository>,
         object_store: Arc<dyn ObjectStore>,
+        quarantine_object_store: Arc<dyn ObjectStore>,
         options: SyncServiceOptions,
     ) -> Self {
         Self {
@@ -65,6 +69,7 @@ impl StandardSyncService {
             read_model_writer,
             quarantine_repository,
             object_store,
+            quarantine_object_store,
             parser: Arc::new(DicomSyncParser::new()),
             key_builder: SyncQuarantineKeyBuilder::new(),
             options,
@@ -264,6 +269,7 @@ impl StandardSyncService {
         let quarantine_key = self.key_builder.build(&claim.ingest_object_id)?;
         move_object(
             self.object_store.as_ref(),
+            self.quarantine_object_store.as_ref(),
             &claim.object_key,
             quarantine_key.clone(),
         )
@@ -305,6 +311,7 @@ impl StandardSyncService {
 
 async fn move_object(
     object_store: &dyn ObjectStore,
+    quarantine_object_store: &dyn ObjectStore,
     original_key: &ObjectKey,
     quarantine_key: ObjectKey,
 ) -> Result<(), QuarantineError> {
@@ -317,7 +324,7 @@ async fn move_object(
                 source,
             })?;
 
-    object_store
+    quarantine_object_store
         .put(quarantine_key.clone(), object.body)
         .await
         .map_err(|source| QuarantineError::ObjectStore {
@@ -544,7 +551,7 @@ mod tests {
     fn claim() -> ClaimedSyncObject {
         ClaimedSyncObject {
             ingest_object_id: IngestObjectId::default(),
-            object_key: ObjectKey::new("ingest/object-1").unwrap(),
+            object_key: ObjectKey::new("object-1").unwrap(),
             content_length: 10,
             payload_representation: raccoon_service_ingest::IngestPayloadRepresentation::DicomFile,
             transfer_syntax_uid: None,
@@ -593,22 +600,24 @@ mod tests {
         }
     }
 
-    fn service_parts(
-        parser: ParserMode,
-    ) -> (
+    type ServiceParts = (
         StandardSyncService,
         Arc<FakeSourceRepository>,
         Arc<FakeWriter>,
         Arc<FakeQuarantineRepository>,
         Arc<FakeObjectStore>,
-    ) {
+        Arc<FakeObjectStore>,
+    );
+
+    fn service_parts(parser: ParserMode) -> ServiceParts {
         let source = Arc::new(FakeSourceRepository::default());
         source.pending.lock().unwrap().push_back(claim());
         let writer = Arc::new(FakeWriter::default());
         let quarantine = Arc::new(FakeQuarantineRepository::default());
         let object_store = Arc::new(FakeObjectStore::default());
+        let quarantine_object_store = Arc::new(FakeObjectStore::default());
         object_store.objects.lock().unwrap().insert(
-            ObjectKey::new("ingest/object-1").unwrap(),
+            ObjectKey::new("object-1").unwrap(),
             Bytes::from_static(b"not a dicom file, but retained"),
         );
         let fake_parser = Arc::new(FakeParser {
@@ -619,25 +628,26 @@ mod tests {
             writer.clone(),
             quarantine.clone(),
             object_store.clone(),
+            quarantine_object_store.clone(),
         )
         .with_parser(fake_parser);
-        (service, source, writer, quarantine, object_store)
+        (
+            service,
+            source,
+            writer,
+            quarantine,
+            object_store,
+            quarantine_object_store,
+        )
     }
 
-    fn service_parts_without_object(
-        parser: ParserMode,
-    ) -> (
-        StandardSyncService,
-        Arc<FakeSourceRepository>,
-        Arc<FakeWriter>,
-        Arc<FakeQuarantineRepository>,
-        Arc<FakeObjectStore>,
-    ) {
+    fn service_parts_without_object(parser: ParserMode) -> ServiceParts {
         let source = Arc::new(FakeSourceRepository::default());
         source.pending.lock().unwrap().push_back(claim());
         let writer = Arc::new(FakeWriter::default());
         let quarantine = Arc::new(FakeQuarantineRepository::default());
         let object_store = Arc::new(FakeObjectStore::default());
+        let quarantine_object_store = Arc::new(FakeObjectStore::default());
         let fake_parser = Arc::new(FakeParser {
             mode: Mutex::new(parser),
         });
@@ -646,14 +656,23 @@ mod tests {
             writer.clone(),
             quarantine.clone(),
             object_store.clone(),
+            quarantine_object_store.clone(),
         )
         .with_parser(fake_parser);
-        (service, source, writer, quarantine, object_store)
+        (
+            service,
+            source,
+            writer,
+            quarantine,
+            object_store,
+            quarantine_object_store,
+        )
     }
 
     #[tokio::test]
     async fn successful_sync_writes_read_model_and_marks_claim_synced() {
-        let (service, source, writer, quarantine, _store) = service_parts(ParserMode::Ok);
+        let (service, source, writer, quarantine, _store, _quarantine_store) =
+            service_parts(ParserMode::Ok);
 
         let result = service
             .sync_once(SyncWorkerId::new("worker-1"))
@@ -669,7 +688,8 @@ mod tests {
 
     #[tokio::test]
     async fn validation_failure_moves_object_to_quarantine_and_marks_terminal() {
-        let (service, source, writer, quarantine, store) = service_parts(ParserMode::Invalid);
+        let (service, source, writer, quarantine, store, quarantine_store) =
+            service_parts(ParserMode::Invalid);
 
         let result = service
             .sync_once(SyncWorkerId::new("worker-1"))
@@ -686,20 +706,28 @@ mod tests {
             records[0]
                 .quarantine_object_key
                 .as_str()
-                .starts_with("sync/quarantine/")
+                .starts_with("sync/")
         );
         assert!(
             !store
                 .objects
                 .lock()
                 .unwrap()
-                .contains_key(&ObjectKey::new("ingest/object-1").unwrap())
+                .contains_key(&ObjectKey::new("object-1").unwrap())
+        );
+        assert!(
+            quarantine_store
+                .objects
+                .lock()
+                .unwrap()
+                .contains_key(&records[0].quarantine_object_key)
         );
     }
 
     #[tokio::test]
     async fn writer_failure_releases_claim_for_retry() {
-        let (service, source, writer, quarantine, _store) = service_parts(ParserMode::Ok);
+        let (service, source, writer, quarantine, _store, _quarantine_store) =
+            service_parts(ParserMode::Ok);
         *writer.fail.lock().unwrap() = true;
 
         let result = service
@@ -715,7 +743,7 @@ mod tests {
 
     #[tokio::test]
     async fn oversized_metadata_is_policy_quarantined_without_retry_release() {
-        let (service, source, writer, quarantine, store) =
+        let (service, source, writer, quarantine, store, quarantine_store) =
             service_parts(ParserMode::MetadataTooLarge);
 
         let result = service
@@ -739,13 +767,20 @@ mod tests {
                 .objects
                 .lock()
                 .unwrap()
-                .contains_key(&ObjectKey::new("ingest/object-1").unwrap())
+                .contains_key(&ObjectKey::new("object-1").unwrap())
+        );
+        assert!(
+            quarantine_store
+                .objects
+                .lock()
+                .unwrap()
+                .contains_key(&records[0].quarantine_object_key)
         );
     }
 
     #[tokio::test]
     async fn object_store_read_failure_releases_claim_for_retry() {
-        let (service, source, writer, quarantine, _store) =
+        let (service, source, writer, quarantine, _store, _quarantine_store) =
             service_parts_without_object(ParserMode::Ok);
 
         let result = service

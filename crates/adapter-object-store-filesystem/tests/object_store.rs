@@ -55,6 +55,26 @@ async fn put_creates_parent_directories_and_streams_body() {
 }
 
 #[tokio::test]
+async fn put_creates_missing_store_root() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let root = temp_dir.path().join("objects/ingest");
+    let store = FsObjectStore::new(&root);
+    let key = key("studies/one/payload.dcm");
+
+    store
+        .put(key.clone(), ByteStream::from("payload"))
+        .await
+        .expect("put succeeds");
+
+    assert_eq!(
+        fs::read(root.join("studies/one/payload.dcm"))
+            .await
+            .expect("object file"),
+        b"payload"
+    );
+}
+
+#[tokio::test]
 async fn get_returns_metadata_and_streaming_body() {
     let (_temp_dir, store) = store();
     let key = key("objects/payload.bin");

@@ -1038,13 +1038,20 @@ mod tests {
     fn service_with_fakes() -> (
         crate::InMemoryIngestService,
         Arc<FakeObjectStore>,
+        Arc<FakeObjectStore>,
         Arc<FakeRepository>,
     ) {
         let object_store = Arc::new(FakeObjectStore::default());
+        let quarantine_object_store = Arc::new(FakeObjectStore::default());
         let repository = Arc::new(FakeRepository::default());
         (
-            crate::InMemoryIngestService::new(object_store.clone(), repository.clone()),
+            crate::InMemoryIngestService::new(
+                object_store.clone(),
+                quarantine_object_store.clone(),
+                repository.clone(),
+            ),
             object_store,
+            quarantine_object_store,
             repository,
         )
     }
@@ -1197,13 +1204,13 @@ mod tests {
             .build(&object_id)
             .expect("valid object key");
 
-        assert_eq!(key.as_str(), format!("ingest/{object_id}"));
+        assert_eq!(key.as_str(), object_id.to_string());
     }
 
     #[tokio::test]
     async fn successful_stream_ingest_returns_object_result_and_summary() {
         let upload_id = IngestUploadId::new();
-        let (service, object_store, repository) = service_with_fakes();
+        let (service, object_store, _quarantine_object_store, repository) = service_with_fakes();
 
         let bytes = explicit_vr_dataset(&identity());
         let stream = tokio_stream::iter(vec![
@@ -1243,7 +1250,7 @@ mod tests {
     #[tokio::test]
     async fn checksum_mismatch_is_streamed_as_per_object_rejection() {
         let upload_id = IngestUploadId::new();
-        let (service, object_store, repository) = service_with_fakes();
+        let (service, object_store, quarantine_object_store, repository) = service_with_fakes();
         let bytes = explicit_vr_dataset(&identity());
 
         let stream = tokio_stream::iter(vec![
@@ -1266,14 +1273,15 @@ mod tests {
             object_result.state,
             proto::IngestObjectState::Quarantined as i32
         );
-        assert_eq!(object_store.puts.lock().unwrap().len(), 1);
+        assert_eq!(object_store.puts.lock().unwrap().len(), 0);
+        assert_eq!(quarantine_object_store.puts.lock().unwrap().len(), 1);
         assert_eq!(repository.records.lock().unwrap().len(), 1);
         assert_eq!(responses.len(), 2);
     }
 
     #[tokio::test]
     async fn malformed_stream_fails_fast() {
-        let (service, _object_store, _repository) = service_with_fakes();
+        let (service, _object_store, _quarantine_object_store, _repository) = service_with_fakes();
 
         let stream = tokio_stream::iter(vec![body_chunk(Bytes::from_static(b"no session"))]);
         let response = collect_stream_responses(service, stream).await;
@@ -1282,7 +1290,7 @@ mod tests {
 
     #[tokio::test]
     async fn oversized_body_chunk_is_rejected_by_transport() {
-        let (service, _object_store, _repository) = service_with_fakes();
+        let (service, _object_store, _quarantine_object_store, _repository) = service_with_fakes();
 
         let stream = tokio_stream::iter(vec![
             upload_begin(&IngestUploadId::new()),
@@ -1296,7 +1304,7 @@ mod tests {
     #[tokio::test]
     async fn repository_failure_is_preserved_in_object_result() {
         let upload_id = IngestUploadId::new();
-        let (service, _object_store, repository) = service_with_fakes();
+        let (service, _object_store, _quarantine_object_store, repository) = service_with_fakes();
         repository
             .failures
             .lock()
@@ -1341,7 +1349,7 @@ mod tests {
     #[tokio::test]
     async fn multi_object_upload_reports_each_result_and_summary() {
         let upload_id = IngestUploadId::new();
-        let (service, object_store, repository) = service_with_fakes();
+        let (service, object_store, _quarantine_object_store, repository) = service_with_fakes();
 
         let bytes = explicit_vr_dataset(&identity());
         let stream = tokio_stream::iter(vec![

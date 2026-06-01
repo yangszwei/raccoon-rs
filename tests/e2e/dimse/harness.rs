@@ -301,7 +301,7 @@ fn require_sqlite3() {
 }
 
 fn read_model_instance_count(ctx: &RaccoonDimseTestContext) -> String {
-    let db = ctx.root.join("data/read.db");
+    let db = ctx.root.join("data/read/read.db");
     if !db.exists() {
         return "missing-db".to_string();
     }

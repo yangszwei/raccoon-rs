@@ -13,6 +13,7 @@ use tokio_util::task::TaskTracker;
 use tonic::transport::Server;
 
 use crate::app::grpc::{bind_grpc_listener, start_grpc_server};
+use crate::component::object_store::{ingest_object_store_root, quarantine_object_store_root};
 use crate::contract::ingest_repository::build_ingest_repository_handles;
 use crate::contract::object_store::build_object_store;
 use crate::error::OrchestrationError;
@@ -36,9 +37,20 @@ impl IngestApp {
 pub async fn build_ingest_app(
     config: &IngestServiceConfig,
 ) -> Result<IngestApp, OrchestrationError> {
-    let object_store = build_object_store(&config.storage, &config.filesystem);
+    let object_store = build_object_store(
+        &config.storage,
+        ingest_object_store_root(&config.filesystem),
+    );
+    let quarantine_object_store = build_object_store(
+        &config.storage,
+        quarantine_object_store_root(&config.filesystem),
+    );
     let repositories = build_ingest_repository_handles(&config.filesystem).await?;
-    let ingest_service = build_ingest_service(object_store, repositories.ingest_repository);
+    let ingest_service = build_ingest_service(
+        object_store,
+        quarantine_object_store,
+        repositories.ingest_repository,
+    );
     let service = ingest_service;
     let (local_addr, incoming) = bind_grpc_listener(&config.grpc).await?;
 

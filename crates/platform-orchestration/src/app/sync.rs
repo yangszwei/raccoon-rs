@@ -12,6 +12,7 @@ use tokio_util::task::TaskTracker;
 use tonic::transport::Server;
 
 use crate::app::grpc::{bind_grpc_listener, start_grpc_server};
+use crate::component::object_store::{ingest_object_store_root, quarantine_object_store_root};
 use crate::contract::ingest_repository::build_ingest_repository_handles;
 use crate::contract::object_store::build_object_store;
 use crate::contract::read_repository::build_read_repository_handles;
@@ -34,7 +35,14 @@ impl SyncApp {
 
 /// Build the sync service application from loaded configuration.
 pub async fn build_sync_app(config: &SyncServiceConfig) -> Result<SyncApp, OrchestrationError> {
-    let object_store = build_object_store(&config.storage, &config.filesystem);
+    let object_store = build_object_store(
+        &config.storage,
+        ingest_object_store_root(&config.filesystem),
+    );
+    let quarantine_object_store = build_object_store(
+        &config.storage,
+        quarantine_object_store_root(&config.filesystem),
+    );
     let ingest_repositories = build_ingest_repository_handles(&config.filesystem).await?;
     let read_repositories = build_read_repository_handles(&config.filesystem).await?;
     let service = build_sync_service(
@@ -42,6 +50,7 @@ pub async fn build_sync_app(config: &SyncServiceConfig) -> Result<SyncApp, Orche
         read_repositories.sync_read_model_writer,
         ingest_repositories.sync_quarantine_repository,
         object_store,
+        quarantine_object_store,
     );
     let (local_addr, incoming) = bind_grpc_listener(&config.grpc).await?;
 

@@ -11,6 +11,7 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 use tracing::{debug, warn};
 
+use crate::component::object_store::{ingest_object_store_root, quarantine_object_store_root};
 use crate::contract::ingest_repository::build_ingest_repository_handles;
 use crate::contract::object_store::build_object_store;
 use crate::contract::read_repository::build_read_repository_handles;
@@ -38,13 +39,21 @@ struct DimseEndpoint {
 pub async fn build_monolith_app(
     config: &MonolithConfig,
 ) -> Result<MonolithApp, OrchestrationError> {
-    let object_store = build_object_store(&config.storage, &config.filesystem);
+    let object_store = build_object_store(
+        &config.storage,
+        ingest_object_store_root(&config.filesystem),
+    );
+    let quarantine_object_store = build_object_store(
+        &config.storage,
+        quarantine_object_store_root(&config.filesystem),
+    );
 
     let ingest_repositories = build_ingest_repository_handles(&config.filesystem).await?;
     let read_repositories = build_read_repository_handles(&config.filesystem).await?;
 
     let ingest_service = build_ingest_service(
         object_store.clone(),
+        quarantine_object_store.clone(),
         ingest_repositories.ingest_repository.clone(),
     );
     let query_service = build_query_service(read_repositories.query_repository);
@@ -55,6 +64,7 @@ pub async fn build_monolith_app(
         read_repositories.sync_read_model_writer,
         ingest_repositories.sync_quarantine_repository,
         object_store,
+        quarantine_object_store,
     );
 
     let application_entity_registry =
@@ -201,8 +211,8 @@ mod tests {
             .expect("listener has local address");
         assert_eq!(local_addr.ip().to_string(), "127.0.0.1");
         assert_ne!(local_addr.port(), 0);
-        assert!(filesystem_root.path().join("ingest.db").exists());
-        assert!(filesystem_root.path().join("read.db").exists());
+        assert!(filesystem_root.path().join("ingest/ingest.db").exists());
+        assert!(filesystem_root.path().join("read/read.db").exists());
 
         let supported_syntaxes = app.dimse_endpoints[0]
             .registry

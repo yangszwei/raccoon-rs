@@ -209,7 +209,7 @@ pub struct SyncQuarantineKeyBuilder {
 impl Default for SyncQuarantineKeyBuilder {
     fn default() -> Self {
         Self {
-            prefix: "sync/quarantine".to_string(),
+            prefix: "sync".to_string(),
         }
     }
 }

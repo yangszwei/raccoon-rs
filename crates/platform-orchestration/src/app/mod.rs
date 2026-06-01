@@ -60,7 +60,7 @@ mod tests {
 
         assert_eq!(app.local_addr().ip().to_string(), "127.0.0.1");
         assert_ne!(app.local_addr().port(), 0);
-        assert!(filesystem_root.path().join("ingest.db").exists());
+        assert!(filesystem_root.path().join("ingest/ingest.db").exists());
     }
 
     #[tokio::test]
@@ -74,7 +74,7 @@ mod tests {
 
         assert_eq!(app.local_addr().ip().to_string(), "127.0.0.1");
         assert_ne!(app.local_addr().port(), 0);
-        assert!(filesystem_root.path().join("read.db").exists());
+        assert!(filesystem_root.path().join("read/read.db").exists());
     }
 
     #[tokio::test]
@@ -90,7 +90,7 @@ mod tests {
 
         assert_eq!(app.local_addr().ip().to_string(), "127.0.0.1");
         assert_ne!(app.local_addr().port(), 0);
-        assert!(filesystem_root.path().join("read.db").exists());
+        assert!(filesystem_root.path().join("read/read.db").exists());
     }
 
     #[tokio::test]
@@ -104,8 +104,8 @@ mod tests {
 
         assert_eq!(app.local_addr().ip().to_string(), "127.0.0.1");
         assert_ne!(app.local_addr().port(), 0);
-        assert!(filesystem_root.path().join("ingest.db").exists());
-        assert!(filesystem_root.path().join("read.db").exists());
+        assert!(filesystem_root.path().join("ingest/ingest.db").exists());
+        assert!(filesystem_root.path().join("read/read.db").exists());
     }
 
     #[tokio::test]

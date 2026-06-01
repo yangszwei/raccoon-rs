@@ -1,9 +1,10 @@
-use raccoon_adapter_object_store_filesystem::FsObjectStore;
-use raccoon_platform_config::component::filesystem::FilesystemConfig;
+use std::path::PathBuf;
 
-/// Build a filesystem-backed object store from loaded configuration.
-pub fn build_filesystem_object_store(config: &FilesystemConfig) -> FsObjectStore {
-    FsObjectStore::new(config.root.clone())
+use raccoon_adapter_object_store_filesystem::FsObjectStore;
+
+/// Build a filesystem-backed object store rooted at `root`.
+pub fn build_filesystem_object_store(root: impl Into<PathBuf>) -> FsObjectStore {
+    FsObjectStore::new(root)
 }
 
 #[cfg(test)]
@@ -13,13 +14,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn build_filesystem_object_store_uses_configured_root() {
-        let config = FilesystemConfig {
-            root: PathBuf::from("objects"),
-        };
+    fn build_filesystem_object_store_uses_root() {
+        let root = PathBuf::from("objects/ingest");
 
-        let store = build_filesystem_object_store(&config);
+        let store = build_filesystem_object_store(root.clone());
 
-        assert_eq!(store.root(), PathBuf::from("objects"));
+        assert_eq!(store.root(), root);
     }
 }

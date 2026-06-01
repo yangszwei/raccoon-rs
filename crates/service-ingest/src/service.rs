@@ -96,6 +96,7 @@ pub trait IngestService: Send + Sync {
 /// In-memory protocol-neutral DICOM storage acceptance service.
 pub struct InMemoryIngestService {
     object_store: Arc<dyn ObjectStore>,
+    quarantine_object_store: Arc<dyn ObjectStore>,
     repository: Arc<dyn IngestRepository>,
     storage_policy: Arc<dyn StorageAcceptancePolicy>,
     key_builder: IngestObjectKeyBuilder,
@@ -105,19 +106,30 @@ pub struct InMemoryIngestService {
 
 impl InMemoryIngestService {
     /// Creates a storage acceptance service.
-    pub fn new(object_store: Arc<dyn ObjectStore>, repository: Arc<dyn IngestRepository>) -> Self {
-        Self::new_with_options(object_store, repository, IngestServiceOptions::default())
+    pub fn new(
+        object_store: Arc<dyn ObjectStore>,
+        quarantine_object_store: Arc<dyn ObjectStore>,
+        repository: Arc<dyn IngestRepository>,
+    ) -> Self {
+        Self::new_with_options(
+            object_store,
+            quarantine_object_store,
+            repository,
+            IngestServiceOptions::default(),
+        )
     }
 
     /// Creates a storage acceptance service with explicit operational limits.
     pub fn new_with_options(
         object_store: Arc<dyn ObjectStore>,
+        quarantine_object_store: Arc<dyn ObjectStore>,
         repository: Arc<dyn IngestRepository>,
         options: IngestServiceOptions,
     ) -> Self {
         let max_concurrent_objects = options.max_concurrent_objects().max(1);
         Self {
             object_store,
+            quarantine_object_store,
             repository,
             storage_policy: Arc::new(AcceptAllStorageAcceptancePolicy),
             key_builder: IngestObjectKeyBuilder::new(),
@@ -555,7 +567,7 @@ impl InMemoryIngestService {
             })?;
         tracing::Span::current().record("ingest.object_key", tracing::field::display(&object_key));
         let put_result = store_staged_body(
-            self.object_store.as_ref(),
+            self.quarantine_object_store.as_ref(),
             record.ingest_object_id.clone(),
             object_key,
             &staged_body,
@@ -943,13 +955,21 @@ mod tests {
     fn service_with_fakes() -> (
         InMemoryIngestService,
         Arc<FakeObjectStore>,
+        Arc<FakeObjectStore>,
         Arc<FakeRepository>,
     ) {
         let object_store = Arc::new(FakeObjectStore::default());
+        let quarantine_object_store = Arc::new(FakeObjectStore::default());
         let repository = Arc::new(FakeRepository::default());
         (
-            InMemoryIngestService::new(object_store.clone(), repository.clone()),
+            InMemoryIngestService::new_with_options(
+                object_store.clone(),
+                quarantine_object_store.clone(),
+                repository.clone(),
+                IngestServiceOptions::default(),
+            ),
             object_store,
+            quarantine_object_store,
             repository,
         )
     }
@@ -959,17 +979,21 @@ mod tests {
     ) -> (
         InMemoryIngestService,
         Arc<FakeObjectStore>,
+        Arc<FakeObjectStore>,
         Arc<FakeRepository>,
     ) {
         let object_store = Arc::new(FakeObjectStore::default());
+        let quarantine_object_store = Arc::new(FakeObjectStore::default());
         let repository = Arc::new(FakeRepository::default());
         (
             InMemoryIngestService::new_with_options(
                 object_store.clone(),
+                quarantine_object_store.clone(),
                 repository.clone(),
                 options,
             ),
             object_store,
+            quarantine_object_store,
             repository,
         )
     }
@@ -1054,14 +1078,14 @@ mod tests {
             .build(&object_id)
             .expect("valid object key");
 
-        assert_eq!(key.as_str(), format!("ingest/{object_id}"));
+        assert_eq!(key.as_str(), object_id.to_string());
     }
 
     #[tokio::test]
     async fn successful_storage_uses_batch_repository_and_preserves_protocol_fields() {
         let upload_id = IngestUploadId::new();
         let parsed_identity = identity();
-        let (service, object_store, repository) = service_with_fakes();
+        let (service, object_store, _quarantine_object_store, repository) = service_with_fakes();
 
         let result = service
             .ingest_upload_object(
@@ -1098,7 +1122,8 @@ mod tests {
         let options =
             IngestServiceOptions::for_filesystem_root(filesystem_root.path().to_path_buf());
         let staging_dir = options.staging_dir().to_path_buf();
-        let (service, _object_store, _repository) = service_with_options(options);
+        let (service, _object_store, _quarantine_object_store, _repository) =
+            service_with_options(options);
 
         let result = service
             .ingest_upload_object(request(IngestUploadId::new()))
@@ -1116,7 +1141,8 @@ mod tests {
             IngestServiceOptions::for_filesystem_root(filesystem_root.path().to_path_buf())
                 .with_max_object_size(4);
         let staging_dir = options.staging_dir().to_path_buf();
-        let (service, object_store, repository) = service_with_options(options);
+        let (service, object_store, _quarantine_object_store, repository) =
+            service_with_options(options);
 
         let result = service
             .ingest_upload_object(request(IngestUploadId::new()))
@@ -1137,7 +1163,7 @@ mod tests {
     #[tokio::test]
     async fn checksum_mismatch_writes_quarantine() {
         let bytes = explicit_vr_dataset(&identity());
-        let (service, object_store, repository) = service_with_fakes();
+        let (service, object_store, quarantine_object_store, repository) = service_with_fakes();
 
         let result = service
             .ingest_upload_object(
@@ -1154,14 +1180,10 @@ mod tests {
             IngestObjectOutcome::RejectedChecksumMismatch { .. }
         ));
         assert_eq!(result.state, IngestObjectState::Quarantined);
-        assert!(
-            result
-                .object_key
-                .unwrap()
-                .as_str()
-                .starts_with("ingest/quarantine/")
-        );
-        assert_eq!(object_store.puts.lock().unwrap().len(), 1);
+        let object_key = result.object_key.expect("quarantined object key");
+        assert_eq!(object_key.as_str(), result.ingest_object_id.to_string());
+        assert_eq!(object_store.puts.lock().unwrap().len(), 0);
+        assert_eq!(quarantine_object_store.puts.lock().unwrap().len(), 1);
         assert_eq!(repository.records.lock().unwrap().len(), 1);
     }
 
@@ -1169,7 +1191,7 @@ mod tests {
     async fn checksum_match_allows_normal_storage() {
         let bytes = explicit_vr_dataset(&identity());
         let checksum = sha256_checksum(&bytes);
-        let (service, _object_store, _repository) = service_with_fakes();
+        let (service, _object_store, _quarantine_object_store, _repository) = service_with_fakes();
 
         let result = service
             .ingest_upload_object(
@@ -1187,7 +1209,7 @@ mod tests {
 
     #[tokio::test]
     async fn cannot_understand_rejection_writes_quarantine_bytes_and_metadata() {
-        let (service, object_store, repository) = service_with_fakes();
+        let (service, object_store, quarantine_object_store, repository) = service_with_fakes();
 
         let result = service
             .ingest_upload_object(malformed_request(IngestUploadId::new()))
@@ -1199,9 +1221,10 @@ mod tests {
             IngestObjectOutcome::RejectedCannotUnderstand { .. }
         ));
         let object_key = result.object_key.expect("quarantined object key");
-        assert!(object_key.as_str().starts_with("ingest/quarantine/"));
+        assert_eq!(object_key.as_str(), result.ingest_object_id.to_string());
         assert_eq!(result.state, IngestObjectState::Quarantined);
-        assert_eq!(object_store.puts.lock().unwrap().len(), 1);
+        assert_eq!(object_store.puts.lock().unwrap().len(), 0);
+        assert_eq!(quarantine_object_store.puts.lock().unwrap().len(), 1);
         assert_eq!(object_store.deletes.lock().unwrap().len(), 0);
         assert_eq!(*repository.calls.lock().unwrap(), 1);
         let records = repository.records.lock().unwrap();
@@ -1215,7 +1238,7 @@ mod tests {
             sop_class_uid: Some("1.2.3.unsupported".to_string()),
             ..identity()
         };
-        let (service, object_store, repository) = service_with_fakes();
+        let (service, object_store, quarantine_object_store, repository) = service_with_fakes();
         let service =
             service.with_storage_policy(SopClassStorageAcceptancePolicy::supported_sop_classes([
                 identity().sop_class_uid.unwrap(),
@@ -1237,15 +1260,11 @@ mod tests {
             result.outcome,
             IngestObjectOutcome::RejectedUnsupportedSopClass { .. }
         ));
-        assert!(
-            result
-                .object_key
-                .unwrap()
-                .as_str()
-                .starts_with("ingest/quarantine/")
-        );
+        let object_key = result.object_key.expect("quarantined object key");
+        assert_eq!(object_key.as_str(), result.ingest_object_id.to_string());
         assert_eq!(result.state, IngestObjectState::Quarantined);
-        assert_eq!(object_store.puts.lock().unwrap().len(), 1);
+        assert_eq!(object_store.puts.lock().unwrap().len(), 0);
+        assert_eq!(quarantine_object_store.puts.lock().unwrap().len(), 1);
         assert_eq!(object_store.deletes.lock().unwrap().len(), 0);
         assert_eq!(*repository.calls.lock().unwrap(), 1);
         assert_eq!(repository.records.lock().unwrap().len(), 1);
@@ -1253,7 +1272,7 @@ mod tests {
 
     #[tokio::test]
     async fn study_mismatch_rejection_writes_quarantine() {
-        let (service, object_store, repository) = service_with_fakes();
+        let (service, object_store, quarantine_object_store, repository) = service_with_fakes();
 
         let result = service
             .ingest_upload_object(
@@ -1266,15 +1285,11 @@ mod tests {
             result.outcome,
             IngestObjectOutcome::RejectedStudyMismatch { .. }
         ));
-        assert!(
-            result
-                .object_key
-                .unwrap()
-                .as_str()
-                .starts_with("ingest/quarantine/")
-        );
+        let object_key = result.object_key.expect("quarantined object key");
+        assert_eq!(object_key.as_str(), result.ingest_object_id.to_string());
         assert_eq!(result.state, IngestObjectState::Quarantined);
-        assert_eq!(object_store.puts.lock().unwrap().len(), 1);
+        assert_eq!(object_store.puts.lock().unwrap().len(), 0);
+        assert_eq!(quarantine_object_store.puts.lock().unwrap().len(), 1);
         assert_eq!(object_store.deletes.lock().unwrap().len(), 0);
         assert_eq!(*repository.calls.lock().unwrap(), 1);
         assert_eq!(repository.records.lock().unwrap().len(), 1);
@@ -1282,7 +1297,7 @@ mod tests {
 
     #[tokio::test]
     async fn single_object_wrapper_uses_batch_repository_status() {
-        let (service, object_store, repository) = service_with_fakes();
+        let (service, object_store, _quarantine_object_store, repository) = service_with_fakes();
         repository
             .failures
             .lock()
@@ -1304,7 +1319,7 @@ mod tests {
 
     #[tokio::test]
     async fn object_store_failure_maps_to_protocol_neutral_outcome() {
-        let (service, object_store, repository) = service_with_fakes();
+        let (service, object_store, _quarantine_object_store, repository) = service_with_fakes();
         *object_store.fail_next.lock().unwrap() = Some(ObjectStoreError::backend("write failed"));
 
         let result = service
@@ -1322,7 +1337,7 @@ mod tests {
     #[tokio::test]
     async fn multi_object_upload_records_stored_objects_in_one_repository_call() {
         let upload_id = IngestUploadId::new();
-        let (service, object_store, repository) = service_with_fakes();
+        let (service, object_store, quarantine_object_store, repository) = service_with_fakes();
 
         let result = service
             .ingest_upload_objects([
@@ -1339,7 +1354,8 @@ mod tests {
             IngestObjectOutcome::RejectedCannotUnderstand { .. }
         ));
         assert!(result.object_results[2].outcome.is_stored());
-        assert_eq!(object_store.puts.lock().unwrap().len(), 3);
+        assert_eq!(object_store.puts.lock().unwrap().len(), 2);
+        assert_eq!(quarantine_object_store.puts.lock().unwrap().len(), 1);
         assert_eq!(object_store.deletes.lock().unwrap().len(), 0);
         assert_eq!(*repository.calls.lock().unwrap(), 1);
         assert_eq!(repository.records.lock().unwrap().len(), 3);
@@ -1350,7 +1366,7 @@ mod tests {
     #[tokio::test]
     async fn chunked_dataset_storage_replays_body_for_storage() {
         let upload_id = IngestUploadId::new();
-        let (service, object_store, repository) = service_with_fakes();
+        let (service, object_store, _quarantine_object_store, repository) = service_with_fakes();
         let parsed_identity = identity();
         let bytes = explicit_vr_dataset(&parsed_identity);
         let request = IngestRequest::new(
@@ -1377,7 +1393,7 @@ mod tests {
     #[tokio::test]
     async fn multi_object_repository_failure_keeps_all_stored_context() {
         let upload_id = IngestUploadId::new();
-        let (service, object_store, repository) = service_with_fakes();
+        let (service, object_store, _quarantine_object_store, repository) = service_with_fakes();
         repository
             .failures
             .lock()
@@ -1426,7 +1442,7 @@ mod tests {
 
     #[tokio::test]
     async fn dataset_storage_does_not_add_file_suffix() {
-        let (service, _object_store, _repository) = service_with_fakes();
+        let (service, _object_store, _quarantine_object_store, _repository) = service_with_fakes();
 
         let result = service
             .ingest_upload_object(request(IngestUploadId::new()))
@@ -1443,7 +1459,7 @@ mod tests {
 
     #[tokio::test]
     async fn instrumentation_does_not_require_payload_debug_output() {
-        let (service, _object_store, _repository) = service_with_fakes();
+        let (service, _object_store, _quarantine_object_store, _repository) = service_with_fakes();
 
         service
             .ingest_upload_object(request(IngestUploadId::new()))

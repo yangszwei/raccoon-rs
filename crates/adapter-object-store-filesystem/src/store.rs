@@ -85,6 +85,9 @@ impl ObjectStore for FsObjectStore {
             ObjectStoreError::invalid_request(format!("object key has no parent path: {key}"))
         })?;
 
+        fs::create_dir_all(&self.root).await.map_err(|err| {
+            map_io_error_with_message("failed to create object store root", err, None)
+        })?;
         self.ensure_existing_parent_path_safe(&key).await?;
         fs::create_dir_all(parent).await.map_err(|err| {
             map_io_error_with_message("failed to create object directory", err, None)
