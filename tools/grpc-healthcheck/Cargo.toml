@@ -1,0 +1,11 @@
+[package]
+name = "grpc-healthcheck"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]
+
+[dependencies]
+tokio = { version = "1.52.1", features = ["macros", "rt-multi-thread"] }
+tonic = "0.14.6"
+tonic-health = "0.14.2"
