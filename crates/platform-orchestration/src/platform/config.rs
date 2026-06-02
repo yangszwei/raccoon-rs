@@ -1,6 +1,6 @@
 use raccoon_platform_config::app::{
-    ApplicationEntityRegistryServiceConfig, IngestServiceConfig, MonolithConfig,
-    QueryServiceConfig, RetrieveServiceConfig, SyncServiceConfig,
+    ApplicationEntityRegistryServiceConfig, DimseGatewayConfig, IngestServiceConfig,
+    MonolithConfig, QueryServiceConfig, RetrieveServiceConfig, SyncServiceConfig,
 };
 
 use crate::error::OrchestrationError;
@@ -13,6 +13,11 @@ pub fn load_monolith_config() -> Result<MonolithConfig, OrchestrationError> {
 /// Load configuration for the ingest service binary.
 pub fn load_ingest_config() -> Result<IngestServiceConfig, OrchestrationError> {
     IngestServiceConfig::load().map_err(Into::into)
+}
+
+/// Load configuration for the DIMSE gateway binary.
+pub fn load_dimse_gateway_config() -> Result<DimseGatewayConfig, OrchestrationError> {
+    DimseGatewayConfig::load().map_err(Into::into)
 }
 
 /// Load configuration for the query service binary.

@@ -2046,6 +2046,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "raccoon-dimse-gateway"
+version = "0.1.0"
+dependencies = [
+ "raccoon-platform-orchestration",
+ "tokio",
+]
+
+[[package]]
 name = "raccoon-ingest"
 version = "0.1.0"
 dependencies = [

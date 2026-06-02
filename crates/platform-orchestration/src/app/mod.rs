@@ -1,6 +1,8 @@
 #[cfg(feature = "grpc")]
 mod application_entity_registry;
 #[cfg(feature = "grpc")]
+mod dimse_gateway;
+#[cfg(feature = "grpc")]
 mod grpc;
 #[cfg(feature = "grpc")]
 mod ingest;
@@ -16,6 +18,8 @@ mod sync;
 pub use application_entity_registry::{
     ApplicationEntityRegistryApp, build_application_entity_registry_app,
 };
+#[cfg(feature = "grpc")]
+pub use dimse_gateway::{DimseGatewayApp, build_dimse_gateway_app};
 #[cfg(feature = "grpc")]
 pub use ingest::{IngestApp, build_ingest_app};
 pub use monolith::{MonolithApp, build_monolith_app};

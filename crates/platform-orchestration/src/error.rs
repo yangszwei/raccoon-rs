@@ -40,6 +40,11 @@ pub enum OrchestrationError {
     #[error(transparent)]
     Dimse(#[from] raccoon_protocol_dimse::DimseError),
 
+    /// DIMSE gateway has no local Application Entities to bind.
+    #[cfg(feature = "grpc")]
+    #[error("DIMSE gateway requires at least one local Application Entity")]
+    NoLocalApplicationEntities,
+
     /// gRPC transport could not be prepared.
     #[cfg(feature = "grpc")]
     #[error(transparent)]
