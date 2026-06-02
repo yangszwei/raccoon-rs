@@ -77,8 +77,19 @@ pub async fn bind_dimse_listener(
     local_ae: &LocalApplicationEntity,
     registry: &ServiceClassRegistry,
 ) -> Result<DimseListener, OrchestrationError> {
+    let supported_abstract_syntax_count = registry.supported_abstract_syntax_uids().len();
     let listener = DimseListener::bind(local_ae)
         .await?
         .with_registry_syntaxes(registry);
+    let local_addr = listener.local_addr()?;
+
+    tracing::info!(
+        ae.title = %local_ae.title(),
+        server.address = %local_addr,
+        dimse.max_concurrent_associations = local_ae.max_concurrent_associations(),
+        dimse.supported_abstract_syntax_count = supported_abstract_syntax_count,
+        "DIMSE server listening"
+    );
+
     Ok(listener)
 }

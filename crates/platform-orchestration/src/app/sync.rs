@@ -10,6 +10,7 @@ use tokio_stream::wrappers::TcpListenerStream;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 use tonic::transport::Server;
+use tracing::info;
 
 use crate::app::grpc::{bind_grpc_listener, start_grpc_server};
 use crate::component::object_store::{ingest_object_store_root, quarantine_object_store_root};
@@ -52,7 +53,7 @@ pub async fn build_sync_app(config: &SyncServiceConfig) -> Result<SyncApp, Orche
         object_store,
         quarantine_object_store,
     );
-    let (local_addr, incoming) = bind_grpc_listener(&config.grpc).await?;
+    let (local_addr, incoming) = bind_grpc_listener("sync", &config.grpc).await?;
 
     Ok(SyncApp {
         local_addr,
@@ -115,6 +116,7 @@ fn start_sync_worker(
 ) {
     task_tracker.spawn(async move {
         let worker_id = SyncWorkerId::new("sync-service-1");
+        info!(sync.worker_id = %worker_id, "sync worker started");
         if let Err(error) = service.run_until_shutdown(worker_id, shutdown).await {
             let _ = fatal_tx.send(FatalError::new("sync", "worker", error));
         }

@@ -42,7 +42,7 @@ pub async fn build_retrieve_app(
     );
     let repositories = build_read_repository_handles(&config.filesystem).await?;
     let service = build_retrieve_service(repositories.retrieve_repository, object_store);
-    let (local_addr, incoming) = bind_grpc_listener(&config.grpc).await?;
+    let (local_addr, incoming) = bind_grpc_listener("retrieve", &config.grpc).await?;
 
     Ok(RetrieveApp {
         local_addr,

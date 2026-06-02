@@ -52,7 +52,7 @@ pub async fn build_ingest_app(
         repositories.ingest_repository,
     );
     let service = ingest_service;
-    let (local_addr, incoming) = bind_grpc_listener(&config.grpc).await?;
+    let (local_addr, incoming) = bind_grpc_listener("ingest", &config.grpc).await?;
 
     Ok(IngestApp {
         local_addr,

@@ -9,7 +9,7 @@ use raccoon_service_sync::{SyncService, SyncWorkerId};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use crate::component::object_store::{ingest_object_store_root, quarantine_object_store_root};
 use crate::contract::ingest_repository::build_ingest_repository_handles;
@@ -135,6 +135,7 @@ fn start_sync_worker(
 ) {
     task_tracker.spawn(async move {
         let worker_id = SyncWorkerId::new("monolith-sync-1");
+        info!(sync.worker_id = %worker_id, "sync worker started");
         if let Err(error) = sync_service.run_until_shutdown(worker_id, shutdown).await {
             let _ = fatal_tx.send(FatalError::new("sync", "worker", error));
         }

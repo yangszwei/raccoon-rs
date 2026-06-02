@@ -36,7 +36,8 @@ pub async fn build_application_entity_registry_app(
     config: &ApplicationEntityRegistryServiceConfig,
 ) -> Result<ApplicationEntityRegistryApp, OrchestrationError> {
     let registry = build_application_entity_registry(&config.application_entities)?;
-    let (local_addr, incoming) = bind_grpc_listener(&config.grpc).await?;
+    let (local_addr, incoming) =
+        bind_grpc_listener("application-entity-registry", &config.grpc).await?;
 
     Ok(ApplicationEntityRegistryApp {
         local_addr,

@@ -12,11 +12,18 @@ use crate::error::OrchestrationError;
 
 /// Bind a gRPC listener from service configuration.
 pub async fn bind_grpc_listener(
+    service_name: &'static str,
     config: &GrpcServerConfig,
 ) -> Result<(SocketAddr, TcpListenerStream), OrchestrationError> {
     let bind_address: SocketAddr = config.bind_address.parse()?;
     let listener = TcpListener::bind(bind_address).await?;
     let local_addr = listener.local_addr()?;
+
+    tracing::info!(
+        service.name = service_name,
+        server.address = %local_addr,
+        "gRPC server listening"
+    );
 
     Ok((local_addr, TcpListenerStream::new(listener)))
 }
