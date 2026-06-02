@@ -1,8 +1,10 @@
 //! DICOM application entity configuration.
 
+use std::collections::BTreeMap;
 use std::net::{Ipv4Addr, SocketAddrV4};
 
-use serde::Deserialize;
+use serde::de::Error;
+use serde::{Deserialize, Deserializer};
 
 const DEFAULT_LOCAL_AE_TITLE: &str = "RACCOON";
 const DEFAULT_LOCAL_AE_BIND_ADDRESS: SocketAddrV4 = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 11112);
@@ -77,9 +79,11 @@ pub struct PeerApplicationEntityConfig {
 #[serde(default)]
 pub struct ApplicationEntitiesConfig {
     /// Local AEs exposed by this process.
+    #[serde(deserialize_with = "deserialize_application_entity_list")]
     pub local: Vec<LocalApplicationEntityConfig>,
 
     /// Peer AEs this process may initiate associations with.
+    #[serde(deserialize_with = "deserialize_application_entity_list")]
     pub peer: Vec<PeerApplicationEntityConfig>,
 }
 
@@ -88,6 +92,35 @@ impl Default for ApplicationEntitiesConfig {
         Self {
             local: vec![LocalApplicationEntityConfig::default()],
             peer: Vec::new(),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ApplicationEntityList<T> {
+    Sequence(Vec<T>),
+    Map(BTreeMap<String, T>),
+}
+
+fn deserialize_application_entity_list<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    match ApplicationEntityList::<T>::deserialize(deserializer)? {
+        ApplicationEntityList::Sequence(items) => Ok(items),
+        ApplicationEntityList::Map(items) => {
+            let mut indexed = items
+                .into_iter()
+                .map(|(key, value)| {
+                    key.parse::<usize>()
+                        .map(|index| (index, value))
+                        .map_err(|_| D::Error::custom(format!("invalid numeric index: {key}")))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            indexed.sort_by_key(|(index, _)| *index);
+            Ok(indexed.into_iter().map(|(_, value)| value).collect())
         }
     }
 }
