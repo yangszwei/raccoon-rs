@@ -7,6 +7,7 @@ edition.workspace = true
 default = []
 grpc = [
     "dep:tonic",
+    "dep:tonic-health",
     "dep:tokio-stream",
     "raccoon-service-application-entity-registry/grpc",
     "raccoon-service-ingest/grpc",
@@ -36,6 +37,7 @@ tokio = { version = "1.52.1", features = ["fs", "rt", "signal", "sync"] }
 tokio-stream = { version = "0.1.17", features = ["net"], optional = true }
 tokio-util = { version = "0.7.18", features = ["rt"] }
 tonic = { version = "0.14.6", optional = true }
+tonic-health = { version = "0.14.2", optional = true }
 tracing.workspace = true
 
 [dev-dependencies]

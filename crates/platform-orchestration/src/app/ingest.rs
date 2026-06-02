@@ -5,14 +5,16 @@ use std::sync::Mutex;
 
 use raccoon_platform_config::app::IngestServiceConfig;
 use raccoon_platform_runtime::{App, FatalError};
-use raccoon_service_ingest::{IngestService, IngestTransportGrpcService};
+use raccoon_service_ingest::{
+    IngestService, IngestTransportGrpcService, IngestTransportServiceServer,
+};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::TcpListenerStream;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 use tonic::transport::Server;
 
-use crate::app::grpc::{bind_grpc_listener, start_grpc_server};
+use crate::app::grpc::{bind_grpc_listener, serving_health_service, start_grpc_server};
 use crate::component::object_store::{ingest_object_store_root, quarantine_object_store_root};
 use crate::contract::ingest_repository::build_ingest_repository_handles;
 use crate::contract::object_store::build_object_store;
@@ -84,8 +86,13 @@ impl App for IngestApp {
         let service = IngestTransportGrpcService::from_shared(self.service.clone()).into_server();
 
         let server = async move {
+            let health_service = serving_health_service::<
+                IngestTransportServiceServer<IngestTransportGrpcService>,
+            >()
+            .await;
             Server::builder()
                 .add_service(service)
+                .add_service(health_service)
                 .serve_with_incoming_shutdown(incoming, async move {
                     shutdown.cancelled().await;
                 })

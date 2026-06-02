@@ -7,6 +7,7 @@ use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::TcpListenerStream;
 use tokio_util::task::TaskTracker;
+use tonic::server::NamedService;
 
 use crate::error::OrchestrationError;
 
@@ -42,4 +43,15 @@ pub fn start_grpc_server<F>(
             let _ = fatal_tx.send(FatalError::new(service_name, "grpc-server", error));
         }
     });
+}
+
+/// Build the standard gRPC health service for a Raccoon service server.
+pub async fn serving_health_service<S>()
+-> tonic_health::pb::health_server::HealthServer<impl tonic_health::pb::health_server::Health>
+where
+    S: NamedService,
+{
+    let (reporter, health_service) = tonic_health::server::health_reporter();
+    reporter.set_serving::<S>().await;
+    health_service
 }
