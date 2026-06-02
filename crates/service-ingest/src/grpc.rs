@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use futures_util::StreamExt;
 use opentelemetry::global;
 use opentelemetry::propagation::{Extractor, Injector};
-use raccoon_contract_object_store::ObjectStoreError;
+use raccoon_contract_object_store::{ObjectKey, ObjectStoreError};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::{Mutex, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
@@ -18,9 +18,10 @@ use tracing::{Instrument, Span, instrument};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use crate::{
-    IngestBatchRepositoryStatus, IngestChecksum, IngestChecksumAlgorithm, IngestObjectId,
-    IngestObjectIdentity, IngestObjectOutcome, IngestObjectState, IngestPayloadRepresentation,
-    IngestRequest, IngestResult, IngestService, IngestSource, IngestUploadId, IngestUploadResult,
+    IngestBatchRepositoryStatus, IngestBatchResult, IngestChecksum, IngestChecksumAlgorithm,
+    IngestObjectId, IngestObjectIdentity, IngestObjectOutcome, IngestObjectState,
+    IngestPayloadRepresentation, IngestRequest, IngestResult, IngestService, IngestSource,
+    IngestUploadId, IngestUploadResult,
 };
 
 pub mod proto {
@@ -115,6 +116,275 @@ where
         });
         client.stream_ingest(request).await
     }
+}
+
+#[derive(Clone)]
+struct RequestSummary {
+    upload_id: IngestUploadId,
+    ingest_object_id: IngestObjectId,
+    identity_hints: IngestObjectIdentity,
+    payload_representation: IngestPayloadRepresentation,
+    transfer_syntax_uid: Option<String>,
+}
+
+#[async_trait]
+impl<T> IngestService for GrpcIngestTransportClient<T>
+where
+    T: tonic::client::GrpcService<tonic::body::Body> + Send + 'static,
+    T::Error: Into<StdError> + Send + Sync,
+    T::Future: Send,
+    T::ResponseBody: Body<Data = Bytes> + Send + 'static,
+    <T::ResponseBody as Body>::Error: Into<StdError> + Send,
+{
+    async fn ingest_upload_object(
+        &self,
+        request: IngestRequest,
+    ) -> Result<IngestResult, crate::IngestError> {
+        let result = self.ingest_upload_objects(vec![request]).await;
+        Ok(result.object_results.into_iter().next().unwrap_or_else(|| {
+            IngestResult::failed(
+                IngestObjectId::default(),
+                result.upload_id,
+                IngestObjectIdentity::default(),
+                IngestPayloadRepresentation::Unknown,
+                None,
+                IngestObjectOutcome::RepositoryFailed {
+                    reason: "gRPC ingest returned no object result".to_string(),
+                },
+            )
+        }))
+    }
+
+    async fn ingest_upload_objects(&self, requests: Vec<IngestRequest>) -> IngestBatchResult {
+        let summaries = requests
+            .iter()
+            .map(RequestSummary::from)
+            .collect::<Vec<_>>();
+        let upload_id = summaries
+            .first()
+            .map(|summary| summary.upload_id.clone())
+            .unwrap_or_default();
+
+        match self
+            .stream_ingest(build_ingest_request_stream(requests))
+            .await
+        {
+            Ok(response) => parse_ingest_response_stream(response.into_inner(), upload_id).await,
+            Err(status) => failed_batch(upload_id, summaries, status.to_string()),
+        }
+    }
+}
+
+impl From<&IngestRequest> for RequestSummary {
+    fn from(request: &IngestRequest) -> Self {
+        Self {
+            upload_id: request.upload_id.clone(),
+            ingest_object_id: request.ingest_object_id.clone().unwrap_or_default(),
+            identity_hints: request.identity_hints.clone(),
+            payload_representation: request.payload_representation,
+            transfer_syntax_uid: request.transfer_syntax_uid.clone(),
+        }
+    }
+}
+
+fn build_ingest_request_stream(
+    requests: Vec<IngestRequest>,
+) -> ReceiverStream<proto::IngestTransportRequest> {
+    let (tx, rx) = mpsc::channel(8);
+
+    tokio::spawn(async move {
+        if requests.is_empty() {
+            let _ = tx
+                .send(transport_request(
+                    proto::ingest_transport_request::Message::SessionBegin(
+                        proto::IngestSessionBegin {
+                            upload_id: IngestUploadId::default().to_string(),
+                            source: Some(proto::IngestSource::default()),
+                        },
+                    ),
+                ))
+                .await;
+            let _ = tx
+                .send(transport_request(
+                    proto::ingest_transport_request::Message::SessionEnd(
+                        proto::IngestSessionEnd {},
+                    ),
+                ))
+                .await;
+            return;
+        }
+
+        let mut requests = requests.into_iter();
+        let Some(first) = requests.next() else {
+            return;
+        };
+        let upload_id = first.upload_id.clone();
+        let source = first.source.clone();
+
+        if send_transport_request(
+            &tx,
+            proto::ingest_transport_request::Message::SessionBegin(proto::IngestSessionBegin {
+                upload_id: upload_id.to_string(),
+                source: Some(source.into()),
+            }),
+        )
+        .await
+        .is_err()
+        {
+            return;
+        }
+
+        for request in std::iter::once(first).chain(requests) {
+            if send_one_ingest_object(&tx, request).await.is_err() {
+                return;
+            }
+        }
+
+        let _ = send_transport_request(
+            &tx,
+            proto::ingest_transport_request::Message::SessionEnd(proto::IngestSessionEnd {}),
+        )
+        .await;
+    });
+
+    ReceiverStream::new(rx)
+}
+
+async fn send_one_ingest_object(
+    tx: &mpsc::Sender<proto::IngestTransportRequest>,
+    request: IngestRequest,
+) -> Result<(), ()> {
+    let object_begin =
+        proto::ingest_transport_request::Message::ObjectBegin(proto::IngestObjectBegin {
+            ingest_object_id: request.ingest_object_id.map(|id| id.to_string()),
+            identity_hints: Some(request.identity_hints.into()),
+            payload_representation: proto::IngestPayloadRepresentation::from(
+                request.payload_representation,
+            ) as i32,
+            transfer_syntax_uid: request.transfer_syntax_uid,
+            expected_study_instance_uid: request.expected_study_instance_uid,
+            checksum: request.checksum.map(Into::into),
+        });
+    send_transport_request(tx, object_begin).await?;
+
+    let mut body = request.body.into_stream();
+    while let Some(chunk) = body.next().await {
+        let chunk = match chunk {
+            Ok(chunk) => chunk,
+            Err(_) => return Err(()),
+        };
+        send_transport_request(
+            tx,
+            proto::ingest_transport_request::Message::BodyChunk(proto::IngestBodyChunk {
+                data: chunk.to_vec(),
+            }),
+        )
+        .await?;
+    }
+
+    send_transport_request(
+        tx,
+        proto::ingest_transport_request::Message::ObjectEnd(proto::IngestObjectEnd {}),
+    )
+    .await
+}
+
+async fn send_transport_request(
+    tx: &mpsc::Sender<proto::IngestTransportRequest>,
+    message: proto::ingest_transport_request::Message,
+) -> Result<(), ()> {
+    tx.send(transport_request(message)).await.map_err(|_| ())
+}
+
+fn transport_request(
+    message: proto::ingest_transport_request::Message,
+) -> proto::IngestTransportRequest {
+    proto::IngestTransportRequest {
+        message: Some(message),
+    }
+}
+
+async fn parse_ingest_response_stream(
+    mut stream: tonic::codec::Streaming<proto::IngestTransportResponse>,
+    upload_id: IngestUploadId,
+) -> IngestBatchResult {
+    let mut object_results = Vec::new();
+    let mut repository_status = IngestBatchRepositoryStatus::Recorded;
+
+    while let Some(message) = stream.next().await {
+        let message = match message {
+            Ok(message) => message,
+            Err(status) => {
+                return IngestBatchResult::new(
+                    upload_id,
+                    object_results,
+                    IngestBatchRepositoryStatus::Failed {
+                        reason: status.to_string(),
+                    },
+                );
+            }
+        };
+
+        match message.message {
+            Some(proto::ingest_transport_response::Message::ObjectResult(result)) => {
+                match IngestResult::try_from(result) {
+                    Ok(result) => object_results.push(result),
+                    Err(status) => {
+                        repository_status = IngestBatchRepositoryStatus::Failed {
+                            reason: status.to_string(),
+                        };
+                    }
+                }
+            }
+            Some(proto::ingest_transport_response::Message::UploadResult(result)) => {
+                if let Some(status) = result.repository_status {
+                    match IngestBatchRepositoryStatus::try_from(status) {
+                        Ok(status) => repository_status = status,
+                        Err(status) => {
+                            repository_status = IngestBatchRepositoryStatus::Failed {
+                                reason: status.to_string(),
+                            };
+                        }
+                    }
+                }
+            }
+            None => {
+                repository_status = IngestBatchRepositoryStatus::Failed {
+                    reason: "gRPC ingest response missing message body".to_string(),
+                };
+            }
+        }
+    }
+
+    IngestBatchResult::new(upload_id, object_results, repository_status)
+}
+
+fn failed_batch(
+    upload_id: IngestUploadId,
+    summaries: Vec<RequestSummary>,
+    reason: String,
+) -> IngestBatchResult {
+    let object_results = summaries
+        .into_iter()
+        .map(|summary| {
+            IngestResult::failed(
+                summary.ingest_object_id,
+                summary.upload_id,
+                summary.identity_hints,
+                summary.payload_representation,
+                summary.transfer_syntax_uid,
+                IngestObjectOutcome::RepositoryFailed {
+                    reason: reason.clone(),
+                },
+            )
+        })
+        .collect();
+
+    IngestBatchResult::new(
+        upload_id,
+        object_results,
+        IngestBatchRepositoryStatus::Failed { reason },
+    )
 }
 
 /// Tonic service adapter for an ingest service implementation.
@@ -746,6 +1016,36 @@ impl TryFrom<i32> for IngestPayloadRepresentation {
     }
 }
 
+impl TryFrom<proto::IngestObjectState> for IngestObjectState {
+    type Error = Status;
+
+    fn try_from(state: proto::IngestObjectState) -> Result<Self, Self::Error> {
+        match state {
+            proto::IngestObjectState::Received => Ok(Self::Received),
+            proto::IngestObjectState::PendingSync => Ok(Self::PendingSync),
+            proto::IngestObjectState::Quarantined => Ok(Self::Quarantined),
+            proto::IngestObjectState::Unspecified => Err(Status::invalid_argument(
+                "ingest object state must be specified",
+            )),
+        }
+    }
+}
+
+impl TryFrom<i32> for IngestObjectState {
+    type Error = Status;
+
+    fn try_from(value: i32) -> Result<Self, Self::Error> {
+        match value {
+            1 => Ok(Self::Received),
+            2 => Ok(Self::PendingSync),
+            3 => Ok(Self::Quarantined),
+            _ => Err(Status::invalid_argument(
+                "ingest object state must be specified",
+            )),
+        }
+    }
+}
+
 impl From<IngestObjectState> for proto::IngestObjectState {
     fn from(state: IngestObjectState) -> Self {
         match state {
@@ -765,6 +1065,19 @@ impl From<IngestPayloadRepresentation> for proto::IngestPayloadRepresentation {
                 Self::DicomWebMetadataAndBulkData
             }
             IngestPayloadRepresentation::Unknown => Self::Unknown,
+        }
+    }
+}
+
+impl From<IngestSource> for proto::IngestSource {
+    fn from(source: IngestSource) -> Self {
+        Self {
+            request_id: source.request_id,
+            correlation_id: source.correlation_id,
+            source_ae: source.source_ae,
+            source_application: source.source_application,
+            protocol: source.protocol,
+            content_type: source.content_type,
         }
     }
 }
@@ -862,6 +1175,57 @@ impl From<IngestObjectOutcome> for proto::IngestObjectOutcome {
     }
 }
 
+impl TryFrom<proto::IngestObjectOutcome> for IngestObjectOutcome {
+    type Error = Status;
+
+    fn try_from(outcome: proto::IngestObjectOutcome) -> Result<Self, Self::Error> {
+        match outcome.outcome {
+            Some(proto::ingest_object_outcome::Outcome::Stored(_)) => Ok(Self::Stored),
+            Some(proto::ingest_object_outcome::Outcome::RejectedCannotUnderstand(rejected)) => {
+                Ok(Self::RejectedCannotUnderstand {
+                    reason: rejected.reason,
+                })
+            }
+            Some(proto::ingest_object_outcome::Outcome::RejectedUnsupportedSopClass(rejected)) => {
+                Ok(Self::RejectedUnsupportedSopClass {
+                    sop_class_uid: rejected.sop_class_uid,
+                    reason: rejected.reason,
+                })
+            }
+            Some(proto::ingest_object_outcome::Outcome::RejectedStudyMismatch(rejected)) => {
+                Ok(Self::RejectedStudyMismatch {
+                    expected_study_instance_uid: rejected.expected_study_instance_uid,
+                    actual_study_instance_uid: rejected.actual_study_instance_uid,
+                })
+            }
+            Some(proto::ingest_object_outcome::Outcome::RejectedChecksumMismatch(rejected)) => {
+                Ok(Self::RejectedChecksumMismatch {
+                    expected: rejected.expected,
+                    actual: rejected.actual,
+                })
+            }
+            Some(proto::ingest_object_outcome::Outcome::RejectedTooLarge(rejected)) => {
+                Ok(Self::RejectedTooLarge {
+                    max_content_length: rejected.max_content_length,
+                })
+            }
+            Some(proto::ingest_object_outcome::Outcome::ObjectStoreFailed(failed)) => {
+                Ok(Self::ObjectStoreFailed {
+                    reason: failed.reason,
+                })
+            }
+            Some(proto::ingest_object_outcome::Outcome::RepositoryFailed(failed)) => {
+                Ok(Self::RepositoryFailed {
+                    reason: failed.reason,
+                })
+            }
+            None => Err(Status::invalid_argument(
+                "ingest object outcome must be specified",
+            )),
+        }
+    }
+}
+
 impl From<IngestResult> for proto::IngestObjectResult {
     fn from(result: IngestResult) -> Self {
         Self {
@@ -882,6 +1246,35 @@ impl From<IngestResult> for proto::IngestObjectResult {
     }
 }
 
+impl TryFrom<proto::IngestObjectResult> for IngestResult {
+    type Error = Status;
+
+    fn try_from(result: proto::IngestObjectResult) -> Result<Self, Self::Error> {
+        Ok(Self {
+            ingest_object_id: IngestObjectId::from_str(result.ingest_object_id.as_str())
+                .map_err(|error| Status::invalid_argument(error.to_string()))?,
+            upload_id: IngestUploadId::from_str(result.upload_id.as_str())
+                .map_err(|error| Status::invalid_argument(error.to_string()))?,
+            object_key: result
+                .object_key
+                .map(|key| ObjectKey::from_str(key.as_str()))
+                .transpose()
+                .map_err(|error| Status::invalid_argument(error.to_string()))?,
+            content_length: result.content_length,
+            etag: result.etag,
+            checksum: result.checksum.map(TryInto::try_into).transpose()?,
+            identity: result.identity.unwrap_or_default().try_into()?,
+            payload_representation: result.payload_representation.try_into()?,
+            transfer_syntax_uid: result.transfer_syntax_uid,
+            state: result.state.try_into()?,
+            outcome: result
+                .outcome
+                .ok_or_else(|| Status::invalid_argument("ingest object outcome missing"))?
+                .try_into()?,
+        })
+    }
+}
+
 impl From<IngestUploadResult> for proto::IngestUploadResult {
     fn from(result: IngestUploadResult) -> Self {
         Self {
@@ -895,6 +1288,24 @@ impl From<IngestUploadResult> for proto::IngestUploadResult {
                     proto::IngestBatchRepositoryRecorded {},
                 )),
             }),
+        }
+    }
+}
+
+impl TryFrom<proto::IngestBatchRepositoryStatus> for IngestBatchRepositoryStatus {
+    type Error = Status;
+
+    fn try_from(status: proto::IngestBatchRepositoryStatus) -> Result<Self, Self::Error> {
+        match status.status {
+            Some(proto::ingest_batch_repository_status::Status::Recorded(_)) => Ok(Self::Recorded),
+            Some(proto::ingest_batch_repository_status::Status::Failed(failed)) => {
+                Ok(Self::Failed {
+                    reason: failed.reason,
+                })
+            }
+            None => Err(Status::invalid_argument(
+                "ingest batch repository status must be specified",
+            )),
         }
     }
 }
