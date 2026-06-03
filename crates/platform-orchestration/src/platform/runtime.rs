@@ -23,10 +23,10 @@ where
     runtime.start().await.map(|_| ())
 }
 
-/// Install Ctrl-C handling for graceful shutdown escalation.
+/// Install process signal handling for graceful shutdown escalation.
 ///
-/// The first Ctrl-C requests graceful shutdown. A second Ctrl-C forces the
-/// runtime to stop waiting for shutdown hooks and tracked tasks.
+/// The first Ctrl-C/SIGTERM requests graceful shutdown. A second signal forces
+/// the runtime to stop waiting for shutdown hooks and tracked tasks.
 pub fn install_ctrl_c_handler<A>(runtime: Arc<Runtime<A>>)
 where
     A: App + 'static,
@@ -34,7 +34,7 @@ where
     tokio::spawn(async move {
         let mut shutdown_requested = false;
 
-        while tokio::signal::ctrl_c().await.is_ok() {
+        while wait_for_shutdown_signal().await.is_some() {
             if shutdown_requested {
                 runtime.force_shutdown();
                 break;
@@ -44,6 +44,25 @@ where
             runtime.shutdown();
         }
     });
+}
+
+async fn wait_for_shutdown_signal() -> Option<()> {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+
+        let mut sigterm = signal(SignalKind::terminate()).ok()?;
+
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => result.ok(),
+            _ = sigterm.recv() => Some(()),
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        tokio::signal::ctrl_c().await.ok()
+    }
 }
 
 /// Convert loaded runtime config into runtime initialization config.
