@@ -141,6 +141,15 @@ impl ServiceClassProvider for ServiceClassRegistry {
     async fn handle(&self, ctx: &mut AssociationContext) -> Result<(), DimseError> {
         let command = ctx.read_command().await?;
 
+        tracing::info!(
+            association.id = ctx.association_id,
+            request.id = ctx.current_request_id(),
+            command = %command.command_field,
+            sop_class_uid = command.sop_class_uid.as_deref(),
+            message_id = command.message_id,
+            "DIMSE request received"
+        );
+
         let provider = self
             .provider_for(command.command_field, command.sop_class_uid.as_deref())
             .ok_or_else(|| match command.sop_class_uid.as_deref() {

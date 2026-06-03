@@ -150,6 +150,7 @@ impl ServiceClassProvider for StorageServiceProvider {
             }
         };
 
+        let response_reason = error_comment.clone();
         let response = {
             let mut r = CStoreResponse::for_request(&request, status);
             if let Some(comment) = error_comment {
@@ -164,7 +165,7 @@ impl ServiceClassProvider for StorageServiceProvider {
             &response.to_command_object(),
         )
         .await?;
-        ctx.record_response_status(status_code);
+        ctx.record_response_status(status_code, response_reason);
         tracing::debug!(
             stage = "response",
             status = format!("0x{status_code:04X}"),
@@ -200,7 +201,7 @@ async fn send_failure(
         &response.to_command_object(),
     )
     .await?;
-    ctx.record_response_status(status_code);
+    ctx.record_response_status(status_code, comment.map(str::to_string));
     Ok(())
 }
 

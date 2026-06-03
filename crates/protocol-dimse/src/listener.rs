@@ -82,8 +82,8 @@ impl DimseListener {
         provider: &dyn ServiceClassProvider,
         policy: &dyn AssociationErrorPolicy,
     ) -> Result<(), DimseError> {
-        let association_id = next_association_id();
         let (socket, peer_addr) = self.tcp_listener.accept().await?;
+        let association_id = next_association_id();
         let ctx = self.establish_association(socket, association_id).await?;
         serve_association(ctx, peer_addr, provider, policy).await
     }
@@ -135,13 +135,13 @@ async fn serve_association(
         ae.called = %called_ae,
         ae.calling = %calling_ae,
         peer.addr = %peer_addr,
-        "DIMSE association accepted"
+        "DICOM association accepted"
     );
 
     loop {
+        ctx.begin_message_cycle();
         let bytes_in_before = ctx.bytes_in();
         let bytes_out_before = ctx.bytes_out();
-        let _request_id = ctx.next_request_id();
 
         let result = provider.handle(&mut ctx).await;
 
@@ -154,29 +154,71 @@ async fn serve_association(
                         "message cycle incomplete after provider returned"
                     );
                 }
-                tracing::debug!(
+
+                let request_command = ctx.request_command();
+                let response_command = ctx.response_command().or(request_command);
+                let command_field =
+                    response_command.map(|command| command.command_field.to_string());
+                let request_command_field =
+                    request_command.map(|command| command.command_field.to_string());
+                let sop_class_uid =
+                    response_command.and_then(|command| command.sop_class_uid.as_deref());
+                let request_message_id = request_command.and_then(|command| command.message_id);
+                let message_id_being_responded_to =
+                    response_command.and_then(|command| command.message_id_being_responded_to);
+                let status = ctx
+                    .response_status()
+                    .or_else(|| response_command.and_then(|command| command.status))
+                    .map(format_dimse_status);
+
+                tracing::info!(
                     association.id = association_id,
+                    request.id = ctx.current_request_id(),
+                    command = command_field.as_deref(),
+                    request.command = request_command_field.as_deref(),
+                    sop_class_uid = sop_class_uid,
+                    request.message_id = request_message_id,
+                    message_id_being_responded_to = message_id_being_responded_to,
+                    status = status.as_deref(),
+                    reason = ctx.response_reason(),
                     bytes_in = ctx.bytes_in().saturating_sub(bytes_in_before),
                     bytes_out = ctx.bytes_out().saturating_sub(bytes_out_before),
-                    status = ?ctx.response_status(),
-                    "DIMSE request completed"
+                    "DIMSE response sent"
                 );
             }
             Err(error) => {
-                tracing::debug!(
-                    association.id = association_id,
-                    command = ?ctx.cached_command().map(|c| c.command_field.to_string()),
-                    error = %error,
-                    "DIMSE request failed"
-                );
-                match policy.on_error(&error) {
+                let action = policy.on_error(&error);
+                if !matches!(error, DimseError::PeerReleaseRequested) {
+                    let command = ctx.request_command().or_else(|| ctx.cached_command());
+                    let command_field = command.map(|command| command.command_field.to_string());
+                    let sop_class_uid =
+                        command.and_then(|command| command.sop_class_uid.as_deref());
+                    let message_id = command.and_then(|command| command.message_id);
+                    let status = ctx.response_status().map(format_dimse_status);
+
+                    tracing::warn!(
+                        association.id = association_id,
+                        request.id = ctx.current_request_id(),
+                        command = command_field.as_deref(),
+                        sop_class_uid = sop_class_uid,
+                        message_id = message_id,
+                        status = status.as_deref(),
+                        reason = ctx.response_reason(),
+                        bytes_in = ctx.bytes_in().saturating_sub(bytes_in_before),
+                        bytes_out = ctx.bytes_out().saturating_sub(bytes_out_before),
+                        error = %error,
+                        "DIMSE request handling failed"
+                    );
+                }
+
+                match action {
                     ErrorPolicyAction::Continue => {
                         continue;
                     }
                     ErrorPolicyAction::Stop => {
                         tracing::info!(
                             association.id = association_id,
-                            "DIMSE association closing (stop)"
+                            "DICOM association closing"
                         );
                         break;
                     }
@@ -184,7 +226,7 @@ async fn serve_association(
                         let _ = ctx.association_mut().send_pdu(&Pdu::ReleaseRP).await;
                         tracing::info!(
                             association.id = association_id,
-                            "DIMSE association released"
+                            "DICOM association released"
                         );
                         break;
                     }
@@ -192,7 +234,7 @@ async fn serve_association(
                         tracing::warn!(
                             association.id = association_id,
                             error = %error,
-                            "DIMSE association aborting"
+                            "DICOM association aborting"
                         );
                         let assoc = ctx.into_dimse_association();
                         let _ = assoc.abort().await;
@@ -204,4 +246,8 @@ async fn serve_association(
     }
 
     Ok(())
+}
+
+fn format_dimse_status(status: u16) -> String {
+    format!("0x{status:04X}")
 }

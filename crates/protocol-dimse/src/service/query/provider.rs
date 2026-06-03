@@ -129,6 +129,7 @@ async fn send_response(
     identifier: Option<&InMemDicomObject>,
 ) -> Result<(), DimseError> {
     let mut response = CFindResponse::for_request(request, status);
+    let response_reason = comment.clone();
     if let Some(comment) = comment {
         response = response.with_error_comment(comment);
     }
@@ -142,7 +143,7 @@ async fn send_response(
         ctx.send_data_set_object(request.presentation_context_id, identifier)
             .await?;
     }
-    ctx.record_response_status(status_code);
+    ctx.record_response_status(status_code, response_reason);
     Ok(())
 }
 

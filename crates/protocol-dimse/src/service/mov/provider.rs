@@ -292,6 +292,7 @@ async fn send_move_response(
     } else {
         counts.remaining
     };
+    let response_reason = comment.clone();
     let mut response = CMoveResponse::for_request(request, status).with_counts(
         remaining,
         counts.completed,
@@ -314,7 +315,7 @@ async fn send_move_response(
         ctx.send_data_set_object(request.presentation_context_id, identifier)
             .await?;
     }
-    ctx.record_response_status(status_code);
+    ctx.record_response_status(status_code, response_reason);
     Ok(())
 }
 

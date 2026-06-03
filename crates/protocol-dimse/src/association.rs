@@ -67,7 +67,11 @@ pub struct AssociationContext {
     association: DimseAssociation,
     pub(crate) association_id: u64,
     next_request_id: u64,
+    current_request_id: Option<u64>,
     response_status: Option<u16>,
+    response_reason: Option<String>,
+    request_command: Option<DimseCommand>,
+    response_command: Option<DimseCommand>,
     reader: DimseReader,
     writer: DimseWriter,
     cached_command_object: Option<CommandObject>,
@@ -81,7 +85,11 @@ impl AssociationContext {
             association,
             association_id,
             next_request_id: 1,
+            current_request_id: None,
             response_status: None,
+            response_reason: None,
+            request_command: None,
+            response_command: None,
             reader: DimseReader::new(),
             writer: DimseWriter::new(),
             cached_command_object: None,
@@ -97,19 +105,50 @@ impl AssociationContext {
         &mut self.association
     }
 
-    pub(crate) fn next_request_id(&mut self) -> u64 {
+    pub(crate) fn begin_message_cycle(&mut self) {
+        self.current_request_id = None;
+        self.response_status = None;
+        self.response_reason = None;
+        self.request_command = None;
+        self.response_command = None;
+        self.cached_command_object = None;
+        self.cached_command = None;
+    }
+
+    pub(crate) fn current_request_id(&self) -> Option<u64> {
+        self.current_request_id
+    }
+
+    fn start_request_cycle(&mut self) -> u64 {
+        if let Some(id) = self.current_request_id {
+            return id;
+        }
+
         let id = self.next_request_id;
         self.next_request_id = self.next_request_id.saturating_add(1);
-        self.response_status = None;
+        self.current_request_id = Some(id);
         id
     }
 
-    pub(crate) fn record_response_status(&mut self, status: u16) {
+    pub(crate) fn record_response_status(&mut self, status: u16, reason: Option<String>) {
         self.response_status = Some(status);
+        self.response_reason = reason;
     }
 
     pub(crate) fn response_status(&self) -> Option<u16> {
         self.response_status
+    }
+
+    pub(crate) fn response_reason(&self) -> Option<&str> {
+        self.response_reason.as_deref()
+    }
+
+    pub(crate) fn request_command(&self) -> Option<&DimseCommand> {
+        self.request_command.as_ref()
+    }
+
+    pub(crate) fn response_command(&self) -> Option<&DimseCommand> {
+        self.response_command.as_ref()
     }
 
     pub(crate) fn cached_command(&self) -> Option<&DimseCommand> {
@@ -137,6 +176,10 @@ impl AssociationContext {
         }
 
         let command = DimseCommand::from_command_object(&self.read_command_object().await?)?;
+        if self.request_command.is_none() {
+            self.start_request_cycle();
+            self.request_command = Some(command.clone());
+        }
         self.cached_command = Some(command.clone());
         Ok(command)
     }
@@ -163,9 +206,16 @@ impl AssociationContext {
         presentation_context_id: u8,
         command: &InMemDicomObject,
     ) -> Result<(), DimseError> {
+        let response_command = DimseCommand::from_command_object(&CommandObject {
+            presentation_context_id,
+            command: command.clone(),
+        })?;
+
         self.writer
             .send_command_object(&mut self.association, presentation_context_id, command)
-            .await
+            .await?;
+        self.response_command = Some(response_command);
+        Ok(())
     }
 
     /// Send one dataset PDV fragment.

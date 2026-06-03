@@ -30,7 +30,7 @@ impl ServiceClassProvider for VerificationServiceProvider {
         let response = CEchoResponse::success_for(&request).to_command_object();
         ctx.send_command_object(request.presentation_context_id, &response)
             .await?;
-        ctx.record_response_status(0x0000);
+        ctx.record_response_status(0x0000, None);
         tracing::debug!(
             stage = "response",
             status = "0x0000",
