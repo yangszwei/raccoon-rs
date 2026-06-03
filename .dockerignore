@@ -1,0 +1,7 @@
+.DS_Store
+.git
+/target
+/config/*.toml
+!/config/*.example.toml
+/raccoon.toml
+/data

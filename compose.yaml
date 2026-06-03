@@ -1,0 +1,131 @@
+name: raccoon
+
+services:
+  dimse-gateway:
+    image: raccoon-dimse-gateway:${IMAGE_TAG:-local}
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        PACKAGE: raccoon-dimse-gateway
+    depends_on:
+      application-entity-registry:
+        condition: service_healthy
+      ingest:
+        condition: service_healthy
+      query:
+        condition: service_healthy
+      retrieve:
+        condition: service_healthy
+    environment:
+      RACCOON_DIMSE_GATEWAY__APPLICATION_ENTITY_REGISTRY__ENDPOINT: http://application-entity-registry:50051
+      RACCOON_DIMSE_GATEWAY__INGEST__ENDPOINT: http://ingest:50051
+      RACCOON_DIMSE_GATEWAY__QUERY__ENDPOINT: http://query:50051
+      RACCOON_DIMSE_GATEWAY__RETRIEVE__ENDPOINT: http://retrieve:50051
+    ports:
+      - "11112:11112"
+
+  application-entity-registry:
+    image: raccoon-application-entity-registry:${IMAGE_TAG:-local}
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        PACKAGE: raccoon-application-entity-registry
+    environment:
+      RACCOON_AE_REGISTRY__GRPC__BIND_ADDRESS: 0.0.0.0:50051
+      RACCOON_AE_REGISTRY__APPLICATION_ENTITIES__LOCAL__0__TITLE: RACCOON
+      RACCOON_AE_REGISTRY__APPLICATION_ENTITIES__LOCAL__0__BIND_ADDRESS: 0.0.0.0:11112
+      RACCOON_AE_REGISTRY__APPLICATION_ENTITIES__LOCAL__0__MAX_CONCURRENT_ASSOCIATIONS: 64
+      RACCOON_AE_REGISTRY__APPLICATION_ENTITIES__LOCAL__0__MAX_PDU_LENGTH: 65536
+    healthcheck:
+      test: [ "CMD", "grpc-healthcheck", "http://127.0.0.1:50051" ]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 3s
+
+  ingest:
+    image: raccoon-ingest:${IMAGE_TAG:-local}
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        PACKAGE: raccoon-ingest
+    environment:
+      RACCOON_INGEST__FILESYSTEM__ROOT: /data
+      RACCOON_INGEST__GRPC__BIND_ADDRESS: 0.0.0.0:50051
+    healthcheck:
+      test: [ "CMD", "grpc-healthcheck", "http://127.0.0.1:50051" ]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 3s
+    volumes:
+      - ingest-db:/data/ingest
+      - objects:/data/objects
+
+  query:
+    image: raccoon-query:${IMAGE_TAG:-local}
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        PACKAGE: raccoon-query
+    environment:
+      RACCOON_QUERY__FILESYSTEM__ROOT: /data
+      RACCOON_QUERY__GRPC__BIND_ADDRESS: 0.0.0.0:50051
+    healthcheck:
+      test: [ "CMD", "grpc-healthcheck", "http://127.0.0.1:50051" ]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 3s
+    volumes:
+      - read-db:/data/read
+
+  retrieve:
+    image: raccoon-retrieve:${IMAGE_TAG:-local}
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        PACKAGE: raccoon-retrieve
+    environment:
+      RACCOON_RETRIEVE__FILESYSTEM__ROOT: /data
+      RACCOON_RETRIEVE__GRPC__BIND_ADDRESS: 0.0.0.0:50051
+    healthcheck:
+      test: [ "CMD", "grpc-healthcheck", "http://127.0.0.1:50051" ]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 3s
+    volumes:
+      - read-db:/data/read
+      - objects:/data/objects
+
+  sync:
+    image: raccoon-sync:${IMAGE_TAG:-local}
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        PACKAGE: raccoon-sync
+    environment:
+      RACCOON_SYNC__FILESYSTEM__ROOT: /data
+      RACCOON_SYNC__GRPC__BIND_ADDRESS: 0.0.0.0:50051
+    healthcheck:
+      test: [ "CMD", "grpc-healthcheck", "http://127.0.0.1:50051" ]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 3s
+    volumes:
+      - ingest-db:/data/ingest
+      - read-db:/data/read
+      - objects:/data/objects
+
+volumes:
+  ingest-db:
+  read-db:
+  objects:
