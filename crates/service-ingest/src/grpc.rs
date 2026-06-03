@@ -140,17 +140,22 @@ where
         &self,
         request: IngestRequest,
     ) -> Result<IngestResult, crate::IngestError> {
+        let summary = RequestSummary::from(&request);
         let result = self.ingest_upload_objects(vec![request]).await;
         Ok(result.object_results.into_iter().next().unwrap_or_else(|| {
+            let reason = match result.repository_status {
+                IngestBatchRepositoryStatus::Failed { reason } => reason,
+                IngestBatchRepositoryStatus::Recorded => {
+                    "gRPC ingest returned no object result".to_string()
+                }
+            };
             IngestResult::failed(
-                IngestObjectId::default(),
+                summary.ingest_object_id,
                 result.upload_id,
-                IngestObjectIdentity::default(),
-                IngestPayloadRepresentation::Unknown,
-                None,
-                IngestObjectOutcome::RepositoryFailed {
-                    reason: "gRPC ingest returned no object result".to_string(),
-                },
+                summary.identity_hints,
+                summary.payload_representation,
+                summary.transfer_syntax_uid,
+                IngestObjectOutcome::RepositoryFailed { reason },
             )
         }))
     }
@@ -273,13 +278,15 @@ async fn send_one_ingest_object(
             Ok(chunk) => chunk,
             Err(_) => return Err(()),
         };
-        send_transport_request(
-            tx,
-            proto::ingest_transport_request::Message::BodyChunk(proto::IngestBodyChunk {
-                data: chunk.to_vec(),
-            }),
-        )
-        .await?;
+        for chunk in chunk.chunks(DEFAULT_MAX_BODY_CHUNK_BYTES) {
+            send_transport_request(
+                tx,
+                proto::ingest_transport_request::Message::BodyChunk(proto::IngestBodyChunk {
+                    data: chunk.to_vec(),
+                }),
+            )
+            .await?;
+        }
     }
 
     send_transport_request(
@@ -1586,6 +1593,25 @@ mod tests {
                 proto::IngestSessionEnd {},
             )),
         }
+    }
+
+    #[tokio::test]
+    async fn request_stream_splits_large_body_chunks() {
+        let upload_id = IngestUploadId::new();
+        let body = Bytes::from(vec![7; DEFAULT_MAX_BODY_CHUNK_BYTES + 17]);
+        let request = IngestRequest::new(upload_id.clone(), ByteStream::once(body));
+        let mut stream = build_ingest_request_stream(vec![request]);
+        let mut body_chunk_lengths = Vec::new();
+
+        while let Some(message) = stream.next().await {
+            if let Some(proto::ingest_transport_request::Message::BodyChunk(chunk)) =
+                message.message
+            {
+                body_chunk_lengths.push(chunk.data.len());
+            }
+        }
+
+        assert_eq!(body_chunk_lengths, vec![DEFAULT_MAX_BODY_CHUNK_BYTES, 17]);
     }
 
     async fn collect_stream_responses(
