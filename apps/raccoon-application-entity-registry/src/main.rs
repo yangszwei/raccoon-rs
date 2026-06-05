@@ -9,8 +9,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &config.telemetry,
     )?;
 
-    let app = raccoon_platform_orchestration::app::build_application_entity_registry_app(&config)
-        .await?;
+    let app =
+        raccoon_platform_orchestration::app::build_application_entity_registry_app(&config).await?;
 
     raccoon_platform_orchestration::platform::runtime::run_runtime(
         app,

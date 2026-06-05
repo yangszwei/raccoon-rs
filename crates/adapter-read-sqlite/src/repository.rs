@@ -525,9 +525,7 @@ fn read_error_kind(err: &SqliteReadRepositoryError) -> &'static str {
         SqliteReadRepositoryError::IntegerOutOfRange { .. } => {
             "raccoon_adapter_read_sqlite::IntegerOutOfRange"
         }
-        SqliteReadRepositoryError::InternalError(_) => {
-            "raccoon_adapter_read_sqlite::InternalError"
-        }
+        SqliteReadRepositoryError::InternalError(_) => "raccoon_adapter_read_sqlite::InternalError",
     }
 }
 

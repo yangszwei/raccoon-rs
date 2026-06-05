@@ -29,6 +29,6 @@ pub use query::{
     AttributeValue, DicomQuery, ProjectedAttribute, Projection, QueryMatch, QueryPage, QueryPaging,
     QueryRetrieveView, QueryScope, ResponseValue, SortDirection, SortKey,
 };
-pub use repository::QueryRepository;
 pub use raccoon_contract_dicom::{PatientRootQueryRetrieveLevel, StudyRootQueryRetrieveLevel};
+pub use repository::QueryRepository;
 pub use service::{QueryService, StandardQueryService};

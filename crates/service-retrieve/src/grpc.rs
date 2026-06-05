@@ -1090,8 +1090,7 @@ mod tests {
         async fn get(
             &self,
             key: &ObjectKey,
-        ) -> raccoon_contract_object_store::Result<raccoon_contract_object_store::Object>
-        {
+        ) -> raccoon_contract_object_store::Result<raccoon_contract_object_store::Object> {
             if self.fail_key.as_ref() == Some(key) {
                 return Err(ObjectStoreError::backend("simulated failure"));
             }
