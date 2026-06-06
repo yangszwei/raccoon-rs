@@ -36,6 +36,11 @@ impl ApplicationEntityRegistryServiceConfig {
             .add_source(File::with_name("config/application-entities").required(false))
             .add_source(File::with_name("application-entity-registry").required(false))
             .add_source(
+                Environment::with_prefix("RACCOON")
+                    .separator("__")
+                    .try_parsing(true),
+            )
+            .add_source(
                 Environment::with_prefix("RACCOON_AE_REGISTRY")
                     .separator("__")
                     .try_parsing(true),

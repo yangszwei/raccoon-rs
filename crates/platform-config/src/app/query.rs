@@ -38,6 +38,7 @@ impl QueryServiceConfig {
         Config::builder()
             .add_source(File::with_name("config/query").required(false))
             .add_source(File::with_name("query").required(false))
+            .add_source(Environment::with_prefix("RACCOON").separator("__"))
             .add_source(Environment::with_prefix("RACCOON_QUERY").separator("__"))
             .build()
             .map_err(ConfigError::Load)?
@@ -50,7 +51,7 @@ impl QueryServiceConfig {
 mod tests {
     use std::path::Path;
 
-    use config::{Config, File};
+    use config::{Config, Environment, File};
 
     use super::QueryServiceConfig;
 
@@ -74,6 +75,35 @@ mod tests {
         assert_eq!(config.app.name, "raccoon-query");
         assert_eq!(config.filesystem.root.to_string_lossy(), "data");
         assert_eq!(config.grpc.bind_address, "127.0.0.1:50053");
+    }
+
+    #[test]
+    fn service_environment_overrides_common_environment() {
+        unsafe {
+            std::env::set_var("RACCOON__RUNTIME__SHUTDOWN_TIMEOUT_SECONDS", "60");
+            std::env::set_var("RACCOON__TELEMETRY__LOG_LEVEL", "debug");
+            std::env::set_var("RACCOON_QUERY__TELEMETRY__LOG_LEVEL", "warn");
+        }
+
+        let config: QueryServiceConfig = Config::builder()
+            .add_source(Environment::with_prefix("RACCOON").separator("__"))
+            .add_source(Environment::with_prefix("RACCOON_QUERY").separator("__"))
+            .build()
+            .expect("config builds")
+            .try_deserialize()
+            .expect("config deserializes");
+
+        assert_eq!(config.runtime.shutdown_timeout_seconds, 60);
+        assert_eq!(
+            config.telemetry.log_level,
+            crate::component::telemetry::LogLevel::Warn
+        );
+
+        unsafe {
+            std::env::remove_var("RACCOON__RUNTIME__SHUTDOWN_TIMEOUT_SECONDS");
+            std::env::remove_var("RACCOON__TELEMETRY__LOG_LEVEL");
+            std::env::remove_var("RACCOON_QUERY__TELEMETRY__LOG_LEVEL");
+        }
     }
 
     fn example_config_path() -> std::path::PathBuf {

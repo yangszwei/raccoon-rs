@@ -1,5 +1,11 @@
 name: raccoon
 
+x-raccoon-grpc-environment: &raccoon-grpc-environment
+  RACCOON__GRPC__BIND_ADDRESS: 0.0.0.0:50051
+
+x-raccoon-data-environment: &raccoon-data-environment
+  RACCOON__FILESYSTEM__ROOT: /data
+
 services:
   dimse-gateway:
     image: raccoon-dimse-gateway:${IMAGE_TAG:-local}
@@ -33,7 +39,7 @@ services:
       args:
         PACKAGE: raccoon-application-entity-registry
     environment:
-      RACCOON_AE_REGISTRY__GRPC__BIND_ADDRESS: 0.0.0.0:50051
+      <<: *raccoon-grpc-environment
       RACCOON_AE_REGISTRY__APPLICATION_ENTITIES__LOCAL__0__TITLE: RACCOON
       RACCOON_AE_REGISTRY__APPLICATION_ENTITIES__LOCAL__0__BIND_ADDRESS: 0.0.0.0:11112
       RACCOON_AE_REGISTRY__APPLICATION_ENTITIES__LOCAL__0__MAX_CONCURRENT_ASSOCIATIONS: 64
@@ -53,8 +59,7 @@ services:
       args:
         PACKAGE: raccoon-ingest
     environment:
-      RACCOON_INGEST__FILESYSTEM__ROOT: /data
-      RACCOON_INGEST__GRPC__BIND_ADDRESS: 0.0.0.0:50051
+      <<: [*raccoon-grpc-environment, *raccoon-data-environment]
     healthcheck:
       test: [ "CMD", "grpc-healthcheck", "http://127.0.0.1:50051" ]
       interval: 5s
@@ -73,8 +78,7 @@ services:
       args:
         PACKAGE: raccoon-query
     environment:
-      RACCOON_QUERY__FILESYSTEM__ROOT: /data
-      RACCOON_QUERY__GRPC__BIND_ADDRESS: 0.0.0.0:50051
+      <<: [*raccoon-grpc-environment, *raccoon-data-environment]
     healthcheck:
       test: [ "CMD", "grpc-healthcheck", "http://127.0.0.1:50051" ]
       interval: 5s
@@ -92,8 +96,7 @@ services:
       args:
         PACKAGE: raccoon-retrieve
     environment:
-      RACCOON_RETRIEVE__FILESYSTEM__ROOT: /data
-      RACCOON_RETRIEVE__GRPC__BIND_ADDRESS: 0.0.0.0:50051
+      <<: [*raccoon-grpc-environment, *raccoon-data-environment]
     healthcheck:
       test: [ "CMD", "grpc-healthcheck", "http://127.0.0.1:50051" ]
       interval: 5s
@@ -112,8 +115,7 @@ services:
       args:
         PACKAGE: raccoon-sync
     environment:
-      RACCOON_SYNC__FILESYSTEM__ROOT: /data
-      RACCOON_SYNC__GRPC__BIND_ADDRESS: 0.0.0.0:50051
+      <<: [*raccoon-grpc-environment, *raccoon-data-environment]
     healthcheck:
       test: [ "CMD", "grpc-healthcheck", "http://127.0.0.1:50051" ]
       interval: 5s

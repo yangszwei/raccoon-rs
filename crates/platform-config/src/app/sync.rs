@@ -42,6 +42,7 @@ impl SyncServiceConfig {
         Config::builder()
             .add_source(File::with_name("config/sync").required(false))
             .add_source(File::with_name("sync").required(false))
+            .add_source(Environment::with_prefix("RACCOON").separator("__"))
             .add_source(Environment::with_prefix("RACCOON_SYNC").separator("__"))
             .build()
             .map_err(ConfigError::Load)?

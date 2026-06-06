@@ -39,6 +39,7 @@ impl DimseGatewayConfig {
         Config::builder()
             .add_source(File::with_name("config/dimse-gateway").required(false))
             .add_source(File::with_name("dimse-gateway").required(false))
+            .add_source(Environment::with_prefix("RACCOON").separator("__"))
             .add_source(Environment::with_prefix("RACCOON_DIMSE_GATEWAY").separator("__"))
             .build()
             .map_err(ConfigError::Load)?

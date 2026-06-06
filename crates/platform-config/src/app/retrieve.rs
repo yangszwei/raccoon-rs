@@ -42,6 +42,7 @@ impl RetrieveServiceConfig {
         Config::builder()
             .add_source(File::with_name("config/retrieve").required(false))
             .add_source(File::with_name("retrieve").required(false))
+            .add_source(Environment::with_prefix("RACCOON").separator("__"))
             .add_source(Environment::with_prefix("RACCOON_RETRIEVE").separator("__"))
             .build()
             .map_err(ConfigError::Load)?

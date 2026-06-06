@@ -42,6 +42,7 @@ impl IngestServiceConfig {
         Config::builder()
             .add_source(File::with_name("config/ingest").required(false))
             .add_source(File::with_name("ingest").required(false))
+            .add_source(Environment::with_prefix("RACCOON").separator("__"))
             .add_source(Environment::with_prefix("RACCOON_INGEST").separator("__"))
             .build()
             .map_err(ConfigError::Load)?
