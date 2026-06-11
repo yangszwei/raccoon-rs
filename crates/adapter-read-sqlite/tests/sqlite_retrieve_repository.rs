@@ -163,6 +163,92 @@ async fn study_and_series_scopes_filter_instances() {
 }
 
 #[tokio::test]
+async fn scoped_series_filters_by_study_and_series() {
+    let (repo, pool) = open_repo().await;
+    insert_instance(
+        &pool,
+        "1.2.3",
+        "1.2.10",
+        "1.2.10.1",
+        "PAT-001",
+        Some("instances/one.dcm"),
+        None,
+        None,
+    )
+    .await;
+    insert_instance(
+        &pool,
+        "1.2.4",
+        "1.2.10",
+        "1.2.10.2",
+        "PAT-002",
+        Some("instances/two.dcm"),
+        None,
+        None,
+    )
+    .await;
+
+    let refs = repo
+        .find_instances_for_study_series(
+            &StudyInstanceUid::new("1.2.3").unwrap(),
+            &SeriesInstanceUid::new("1.2.10").unwrap(),
+        )
+        .await
+        .expect("find scoped series instances");
+
+    assert_eq!(refs.len(), 1);
+    assert_eq!(
+        refs[0].identity.sop_instance_uid,
+        SopInstanceUid::new("1.2.10.1").unwrap()
+    );
+}
+
+#[tokio::test]
+async fn scoped_instance_filters_by_parent_uids() {
+    let (repo, pool) = open_repo().await;
+    insert_instance(
+        &pool,
+        "1.2.3",
+        "1.2.3.1",
+        "1.2.3.1.1",
+        "PAT-001",
+        Some("instances/one.dcm"),
+        None,
+        None,
+    )
+    .await;
+
+    let matched = repo
+        .find_instance_in_scope(
+            Some(&StudyInstanceUid::new("1.2.3").unwrap()),
+            Some(&SeriesInstanceUid::new("1.2.3.1").unwrap()),
+            &SopInstanceUid::new("1.2.3.1.1").unwrap(),
+        )
+        .await
+        .expect("find scoped instance");
+    let wrong_study = repo
+        .find_instance_in_scope(
+            Some(&StudyInstanceUid::new("1.2.4").unwrap()),
+            Some(&SeriesInstanceUid::new("1.2.3.1").unwrap()),
+            &SopInstanceUid::new("1.2.3.1.1").unwrap(),
+        )
+        .await
+        .expect("find scoped instance with wrong study");
+    let wrong_series = repo
+        .find_instance_in_scope(
+            Some(&StudyInstanceUid::new("1.2.3").unwrap()),
+            Some(&SeriesInstanceUid::new("1.2.3.2").unwrap()),
+            &SopInstanceUid::new("1.2.3.1.1").unwrap(),
+        )
+        .await
+        .expect("find scoped instance with wrong series");
+
+    assert!(matched.is_some());
+    assert!(wrong_study.is_none());
+    assert!(wrong_series.is_none());
+}
+
+#[tokio::test]
 async fn instance_scope_returns_none_for_missing_or_unavailable_object() {
     let (repo, pool) = open_repo().await;
     insert_instance(

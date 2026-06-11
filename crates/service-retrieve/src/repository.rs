@@ -45,10 +45,39 @@ pub trait RetrieveRepository: Send + Sync {
         uid: &SeriesInstanceUid,
     ) -> Result<Vec<InstanceRef>, RetrieveRepositoryError>;
 
+    /// Returns all instances belonging to the given series within the given
+    /// study.
+    async fn find_instances_for_study_series(
+        &self,
+        study_uid: &StudyInstanceUid,
+        series_uid: &SeriesInstanceUid,
+    ) -> Result<Vec<InstanceRef>, RetrieveRepositoryError> {
+        Ok(self
+            .find_instances_for_series(series_uid)
+            .await?
+            .into_iter()
+            .filter(|ref_| &ref_.identity.study_instance_uid == study_uid)
+            .collect())
+    }
+
     /// Returns the instance with the given SOP Instance UID, or `None` if it
     /// is not stored.
     async fn find_instance(
         &self,
         uid: &SopInstanceUid,
     ) -> Result<Option<InstanceRef>, RetrieveRepositoryError>;
+
+    /// Returns the instance with the given SOP Instance UID constrained to its
+    /// parent study and series when supplied.
+    async fn find_instance_in_scope(
+        &self,
+        study_uid: Option<&StudyInstanceUid>,
+        series_uid: Option<&SeriesInstanceUid>,
+        sop_uid: &SopInstanceUid,
+    ) -> Result<Option<InstanceRef>, RetrieveRepositoryError> {
+        Ok(self.find_instance(sop_uid).await?.filter(|ref_| {
+            study_uid.is_none_or(|uid| ref_.identity.study_instance_uid == *uid)
+                && series_uid.is_none_or(|uid| ref_.identity.series_instance_uid == *uid)
+        }))
+    }
 }

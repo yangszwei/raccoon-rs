@@ -460,6 +460,7 @@ fn build_retrieve_requests(
             .map(|uid| {
                 SeriesInstanceUid::new(uid)
                     .map(|series_instance_uid| RetrieveScope::Series {
+                        study_instance_uid: None,
                         series_instance_uid,
                     })
                     .map_err(|e| e.to_string())
@@ -469,7 +470,11 @@ fn build_retrieve_requests(
             .into_iter()
             .map(|uid| {
                 SopInstanceUid::new(uid)
-                    .map(|sop_instance_uid| RetrieveScope::Instance { sop_instance_uid })
+                    .map(|sop_instance_uid| RetrieveScope::Instance {
+                        study_instance_uid: None,
+                        series_instance_uid: None,
+                        sop_instance_uid,
+                    })
                     .map_err(|e| e.to_string())
             })
             .collect::<Result<Vec<_>, _>>()?,

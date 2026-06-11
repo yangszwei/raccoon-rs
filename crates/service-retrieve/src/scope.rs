@@ -33,11 +33,25 @@ pub enum RetrieveScope {
 
     /// All instances belonging to a series.
     Series {
+        /// Optional parent Study Instance UID constraint.
+        ///
+        /// DICOMweb WADO-RS supplies this through the URL hierarchy. DIMSE
+        /// C-GET/C-MOVE may omit it when the request Identifier only carries
+        /// the series unique key.
+        study_instance_uid: Option<StudyInstanceUid>,
         series_instance_uid: SeriesInstanceUid,
     },
 
     /// A single SOP instance.
-    Instance { sop_instance_uid: SopInstanceUid },
+    Instance {
+        /// Optional parent Study Instance UID constraint from hierarchical
+        /// protocols such as WADO-RS.
+        study_instance_uid: Option<StudyInstanceUid>,
+        /// Optional parent Series Instance UID constraint from hierarchical
+        /// protocols such as WADO-RS.
+        series_instance_uid: Option<SeriesInstanceUid>,
+        sop_instance_uid: SopInstanceUid,
+    },
 }
 
 impl RetrieveScope {
@@ -117,6 +131,7 @@ mod tests {
     #[test]
     fn series_scope_stores_uid() {
         let scope = RetrieveScope::Series {
+            study_instance_uid: None,
             series_instance_uid: series_uid(),
         };
 
@@ -126,6 +141,8 @@ mod tests {
     #[test]
     fn instance_scope_stores_uid() {
         let scope = RetrieveScope::Instance {
+            study_instance_uid: None,
+            series_instance_uid: None,
             sop_instance_uid: sop_uid(),
         };
 
@@ -160,6 +177,7 @@ mod tests {
         );
         assert_eq!(
             RetrieveScope::Series {
+                study_instance_uid: None,
                 series_instance_uid: series_uid()
             }
             .label(),
@@ -167,6 +185,8 @@ mod tests {
         );
         assert_eq!(
             RetrieveScope::Instance {
+                study_instance_uid: None,
+                series_instance_uid: None,
                 sop_instance_uid: sop_uid()
             }
             .label(),

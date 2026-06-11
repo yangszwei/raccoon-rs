@@ -108,14 +108,30 @@ async fn resolve_scope(
                 .await
         }
         RetrieveScope::Series {
+            study_instance_uid,
             series_instance_uid,
-        } => {
-            repository
-                .find_instances_for_series(series_instance_uid)
-                .await
-        }
-        RetrieveScope::Instance { sop_instance_uid } => repository
-            .find_instance(sop_instance_uid)
+        } => match study_instance_uid {
+            Some(study_uid) => {
+                repository
+                    .find_instances_for_study_series(study_uid, series_instance_uid)
+                    .await
+            }
+            None => {
+                repository
+                    .find_instances_for_series(series_instance_uid)
+                    .await
+            }
+        },
+        RetrieveScope::Instance {
+            study_instance_uid,
+            series_instance_uid,
+            sop_instance_uid,
+        } => repository
+            .find_instance_in_scope(
+                study_instance_uid.as_ref(),
+                series_instance_uid.as_ref(),
+                sop_instance_uid,
+            )
             .await
             .map(|opt| opt.into_iter().collect()),
     }
@@ -347,6 +363,7 @@ mod tests {
 
         let result = svc
             .retrieve(RetrieveRequest::new(RetrieveScope::Series {
+                study_instance_uid: None,
                 series_instance_uid: series_uid("1"),
             }))
             .await
@@ -355,6 +372,35 @@ mod tests {
         assert_eq!(result.instance_count, 2);
         let items = collect_stream(result).await;
         assert_eq!(items.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn scoped_series_filters_by_parent_study_before_streaming() {
+        let matching = instance_ref(1);
+        let mut other_study = instance_ref(2);
+        other_study.identity.study_instance_uid = uid("99");
+        let repo = FakeRepository {
+            series_refs: vec![matching.clone(), other_study.clone()],
+            ..Default::default()
+        };
+        let store = object_store_with(&[matching.clone(), other_study]);
+        let svc = service(repo, store);
+
+        let result = svc
+            .retrieve(RetrieveRequest::new(RetrieveScope::Series {
+                study_instance_uid: Some(matching.identity.study_instance_uid.clone()),
+                series_instance_uid: matching.identity.series_instance_uid.clone(),
+            }))
+            .await
+            .expect("retrieve succeeds");
+
+        assert_eq!(result.instance_count, 1);
+        let items = collect_stream(result).await;
+        assert_eq!(items.len(), 1);
+        assert_eq!(
+            items[0].as_ref().unwrap().identity.sop_instance_uid,
+            matching.identity.sop_instance_uid
+        );
     }
 
     #[tokio::test]
@@ -369,6 +415,8 @@ mod tests {
 
         let result = svc
             .retrieve(RetrieveRequest::new(RetrieveScope::Instance {
+                study_instance_uid: None,
+                series_instance_uid: None,
                 sop_instance_uid: sop_uid("1"),
             }))
             .await
@@ -378,6 +426,29 @@ mod tests {
         let items = collect_stream(result).await;
         assert_eq!(items.len(), 1);
         assert!(items[0].is_ok());
+    }
+
+    #[tokio::test]
+    async fn scoped_instance_rejects_mismatched_parent_before_streaming() {
+        let ref_ = instance_ref(1);
+        let repo = FakeRepository {
+            instance_ref: Some(ref_.clone()),
+            ..Default::default()
+        };
+        let store = object_store_with(std::slice::from_ref(&ref_));
+        let svc = service(repo, store);
+
+        let result = svc
+            .retrieve(RetrieveRequest::new(RetrieveScope::Instance {
+                study_instance_uid: Some(uid("99")),
+                series_instance_uid: Some(ref_.identity.series_instance_uid.clone()),
+                sop_instance_uid: ref_.identity.sop_instance_uid.clone(),
+            }))
+            .await
+            .expect("retrieve succeeds");
+
+        assert_eq!(result.instance_count, 0);
+        assert!(collect_stream(result).await.is_empty());
     }
 
     #[tokio::test]
@@ -414,6 +485,8 @@ mod tests {
 
         let result = svc
             .retrieve(RetrieveRequest::new(RetrieveScope::Instance {
+                study_instance_uid: None,
+                series_instance_uid: None,
                 sop_instance_uid: sop_uid("1"),
             }))
             .await
@@ -485,6 +558,8 @@ mod tests {
 
         let result = svc
             .retrieve(RetrieveRequest::new(RetrieveScope::Instance {
+                study_instance_uid: None,
+                series_instance_uid: None,
                 sop_instance_uid: sop_uid("999"),
             }))
             .await
@@ -563,6 +638,8 @@ mod tests {
 
         let result = svc
             .retrieve(RetrieveRequest::new(RetrieveScope::Instance {
+                study_instance_uid: None,
+                series_instance_uid: None,
                 sop_instance_uid: sop_uid("1"),
             }))
             .await

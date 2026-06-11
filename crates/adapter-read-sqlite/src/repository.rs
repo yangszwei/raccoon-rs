@@ -202,6 +202,38 @@ impl RetrieveRepository for SqliteReadRepository {
         skip_all,
         fields(
             db.system = "sqlite",
+            retrieve.scope = "series",
+            error.type = tracing::field::Empty,
+        )
+    )]
+    async fn find_instances_for_study_series(
+        &self,
+        study_uid: &StudyInstanceUid,
+        series_uid: &SeriesInstanceUid,
+    ) -> Result<Vec<InstanceRef>, RetrieveRepositoryError> {
+        let rows = sqlx::query(
+            "SELECT study_instance_uid, series_instance_uid, sop_instance_uid, sop_class_uid, \
+                    transfer_syntax_uid, object_key, object_size_bytes \
+             FROM instances \
+             WHERE study_instance_uid = ? AND series_instance_uid = ? AND object_key IS NOT NULL \
+             ORDER BY sop_instance_uid",
+        )
+        .bind(study_uid.as_str())
+        .bind(series_uid.as_str())
+        .fetch_all(&self.pool)
+        .await
+        .map_err(retrieve_query_error)?;
+
+        rows.into_iter()
+            .map(materialize_instance_ref)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    #[instrument(
+        skip_all,
+        fields(
+            db.system = "sqlite",
             retrieve.scope = "instance",
             error.type = tracing::field::Empty,
         )
@@ -219,6 +251,78 @@ impl RetrieveRepository for SqliteReadRepository {
         .bind(uid.as_str())
         .fetch_optional(&self.pool)
         .await
+        .map_err(retrieve_query_error)?;
+
+        row.map(materialize_instance_ref)
+            .transpose()
+            .map_err(Into::into)
+    }
+
+    #[instrument(
+        skip_all,
+        fields(
+            db.system = "sqlite",
+            retrieve.scope = "instance",
+            error.type = tracing::field::Empty,
+        )
+    )]
+    async fn find_instance_in_scope(
+        &self,
+        study_uid: Option<&StudyInstanceUid>,
+        series_uid: Option<&SeriesInstanceUid>,
+        sop_uid: &SopInstanceUid,
+    ) -> Result<Option<InstanceRef>, RetrieveRepositoryError> {
+        let row = match (study_uid, series_uid) {
+            (Some(study_uid), Some(series_uid)) => {
+                sqlx::query(
+                    "SELECT study_instance_uid, series_instance_uid, sop_instance_uid, sop_class_uid, \
+                            transfer_syntax_uid, object_key, object_size_bytes \
+                     FROM instances \
+                     WHERE study_instance_uid = ? AND series_instance_uid = ? AND sop_instance_uid = ? \
+                       AND object_key IS NOT NULL",
+                )
+                .bind(study_uid.as_str())
+                .bind(series_uid.as_str())
+                .bind(sop_uid.as_str())
+                .fetch_optional(&self.pool)
+                .await
+            }
+            (Some(study_uid), None) => {
+                sqlx::query(
+                    "SELECT study_instance_uid, series_instance_uid, sop_instance_uid, sop_class_uid, \
+                            transfer_syntax_uid, object_key, object_size_bytes \
+                     FROM instances \
+                     WHERE study_instance_uid = ? AND sop_instance_uid = ? AND object_key IS NOT NULL",
+                )
+                .bind(study_uid.as_str())
+                .bind(sop_uid.as_str())
+                .fetch_optional(&self.pool)
+                .await
+            }
+            (None, Some(series_uid)) => {
+                sqlx::query(
+                    "SELECT study_instance_uid, series_instance_uid, sop_instance_uid, sop_class_uid, \
+                            transfer_syntax_uid, object_key, object_size_bytes \
+                     FROM instances \
+                     WHERE series_instance_uid = ? AND sop_instance_uid = ? AND object_key IS NOT NULL",
+                )
+                .bind(series_uid.as_str())
+                .bind(sop_uid.as_str())
+                .fetch_optional(&self.pool)
+                .await
+            }
+            (None, None) => {
+                sqlx::query(
+                    "SELECT study_instance_uid, series_instance_uid, sop_instance_uid, sop_class_uid, \
+                            transfer_syntax_uid, object_key, object_size_bytes \
+                     FROM instances \
+                     WHERE sop_instance_uid = ? AND object_key IS NOT NULL",
+                )
+                .bind(sop_uid.as_str())
+                .fetch_optional(&self.pool)
+                .await
+            }
+        }
         .map_err(retrieve_query_error)?;
 
         row.map(materialize_instance_ref)

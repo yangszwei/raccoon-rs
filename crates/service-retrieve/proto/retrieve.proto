@@ -29,7 +29,22 @@ message RetrieveScope {
     string series_instance_uid = 3;
     // A single SOP instance.
     string sop_instance_uid = 4;
+    // All instances belonging to a series constrained to a parent study.
+    ScopedSeries scoped_series = 5;
+    // A single SOP instance constrained to parent study/series values.
+    ScopedInstance scoped_instance = 6;
   }
+}
+
+message ScopedSeries {
+  string study_instance_uid = 1;
+  string series_instance_uid = 2;
+}
+
+message ScopedInstance {
+  optional string study_instance_uid = 1;
+  optional string series_instance_uid = 2;
+  string sop_instance_uid = 3;
 }
 
 // Server-streamed retrieve message.

@@ -653,13 +653,41 @@ impl From<crate::RetrieveScope> for proto::RetrieveScope {
                 )
             }
             crate::RetrieveScope::Series {
+                study_instance_uid: Some(study_instance_uid),
+                series_instance_uid,
+            } => proto::retrieve_scope::Scope::ScopedSeries(proto::ScopedSeries {
+                study_instance_uid: study_instance_uid.as_str().to_owned(),
+                series_instance_uid: series_instance_uid.as_str().to_owned(),
+            }),
+            crate::RetrieveScope::Series {
+                study_instance_uid: None,
                 series_instance_uid,
             } => proto::retrieve_scope::Scope::SeriesInstanceUid(
                 series_instance_uid.as_str().to_owned(),
             ),
-            crate::RetrieveScope::Instance { sop_instance_uid } => {
-                proto::retrieve_scope::Scope::SopInstanceUid(sop_instance_uid.as_str().to_owned())
-            }
+            crate::RetrieveScope::Instance {
+                study_instance_uid: Some(study_instance_uid),
+                series_instance_uid,
+                sop_instance_uid,
+            } => proto::retrieve_scope::Scope::ScopedInstance(proto::ScopedInstance {
+                study_instance_uid: Some(study_instance_uid.as_str().to_owned()),
+                series_instance_uid: series_instance_uid.map(|uid| uid.as_str().to_owned()),
+                sop_instance_uid: sop_instance_uid.as_str().to_owned(),
+            }),
+            crate::RetrieveScope::Instance {
+                study_instance_uid: None,
+                series_instance_uid: Some(series_instance_uid),
+                sop_instance_uid,
+            } => proto::retrieve_scope::Scope::ScopedInstance(proto::ScopedInstance {
+                study_instance_uid: None,
+                series_instance_uid: Some(series_instance_uid.as_str().to_owned()),
+                sop_instance_uid: sop_instance_uid.as_str().to_owned(),
+            }),
+            crate::RetrieveScope::Instance {
+                study_instance_uid: None,
+                series_instance_uid: None,
+                sop_instance_uid,
+            } => proto::retrieve_scope::Scope::SopInstanceUid(sop_instance_uid.as_str().to_owned()),
         };
         Self { scope: Some(scope) }
     }
@@ -679,13 +707,47 @@ impl TryFrom<proto::RetrieveScope> for crate::RetrieveScope {
             Some(proto::retrieve_scope::Scope::SeriesInstanceUid(uid)) => {
                 SeriesInstanceUid::new(uid)
                     .map(|series_instance_uid| crate::RetrieveScope::Series {
+                        study_instance_uid: None,
                         series_instance_uid,
                     })
                     .map_err(|e| Status::invalid_argument(e.to_string()))
             }
             Some(proto::retrieve_scope::Scope::SopInstanceUid(uid)) => SopInstanceUid::new(uid)
-                .map(|sop_instance_uid| crate::RetrieveScope::Instance { sop_instance_uid })
+                .map(|sop_instance_uid| crate::RetrieveScope::Instance {
+                    study_instance_uid: None,
+                    series_instance_uid: None,
+                    sop_instance_uid,
+                })
                 .map_err(|e| Status::invalid_argument(e.to_string())),
+            Some(proto::retrieve_scope::Scope::ScopedSeries(scope)) => {
+                let study_instance_uid = StudyInstanceUid::new(scope.study_instance_uid)
+                    .map_err(|e| Status::invalid_argument(e.to_string()))?;
+                let series_instance_uid = SeriesInstanceUid::new(scope.series_instance_uid)
+                    .map_err(|e| Status::invalid_argument(e.to_string()))?;
+                Ok(crate::RetrieveScope::Series {
+                    study_instance_uid: Some(study_instance_uid),
+                    series_instance_uid,
+                })
+            }
+            Some(proto::retrieve_scope::Scope::ScopedInstance(scope)) => {
+                let study_instance_uid = scope
+                    .study_instance_uid
+                    .map(StudyInstanceUid::new)
+                    .transpose()
+                    .map_err(|e| Status::invalid_argument(e.to_string()))?;
+                let series_instance_uid = scope
+                    .series_instance_uid
+                    .map(SeriesInstanceUid::new)
+                    .transpose()
+                    .map_err(|e| Status::invalid_argument(e.to_string()))?;
+                let sop_instance_uid = SopInstanceUid::new(scope.sop_instance_uid)
+                    .map_err(|e| Status::invalid_argument(e.to_string()))?;
+                Ok(crate::RetrieveScope::Instance {
+                    study_instance_uid,
+                    series_instance_uid,
+                    sop_instance_uid,
+                })
+            }
             None => Err(Status::invalid_argument("retrieve scope must be specified")),
         }
     }
@@ -898,6 +960,18 @@ mod tests {
     #[test]
     fn series_scope_round_trips_through_proto() {
         let scope = crate::RetrieveScope::Series {
+            study_instance_uid: None,
+            series_instance_uid: series_uid(),
+        };
+        let proto_scope = proto::RetrieveScope::from(scope.clone());
+        let recovered = crate::RetrieveScope::try_from(proto_scope).unwrap();
+        assert_eq!(recovered, scope);
+    }
+
+    #[test]
+    fn scoped_series_scope_round_trips_through_proto() {
+        let scope = crate::RetrieveScope::Series {
+            study_instance_uid: Some(study_uid()),
             series_instance_uid: series_uid(),
         };
         let proto_scope = proto::RetrieveScope::from(scope.clone());
@@ -908,6 +982,20 @@ mod tests {
     #[test]
     fn instance_scope_round_trips_through_proto() {
         let scope = crate::RetrieveScope::Instance {
+            study_instance_uid: None,
+            series_instance_uid: None,
+            sop_instance_uid: sop_uid(1),
+        };
+        let proto_scope = proto::RetrieveScope::from(scope.clone());
+        let recovered = crate::RetrieveScope::try_from(proto_scope).unwrap();
+        assert_eq!(recovered, scope);
+    }
+
+    #[test]
+    fn scoped_instance_scope_round_trips_through_proto() {
+        let scope = crate::RetrieveScope::Instance {
+            study_instance_uid: Some(study_uid()),
+            series_instance_uid: Some(series_uid()),
             sop_instance_uid: sop_uid(1),
         };
         let proto_scope = proto::RetrieveScope::from(scope.clone());
