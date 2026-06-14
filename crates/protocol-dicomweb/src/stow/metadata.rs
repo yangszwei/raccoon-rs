@@ -5,10 +5,16 @@ use axum::body::Body;
 use axum::http::{HeaderMap, Uri};
 use axum::response::Response;
 use base64::Engine;
+use dicom_core::VR;
+use dicom_core::dictionary::{DataDictionary, DataDictionaryEntry};
+use dicom_dictionary_std::StandardDataDictionary;
 use dicom_dictionary_std::uids;
 use dicom_object::{FileMetaTableBuilder, InMemDicomObject};
 use futures_util::TryStreamExt;
-use raccoon_contract_dicom::{SeriesInstanceUid, SopClassUid, SopInstanceUid, StudyInstanceUid};
+use raccoon_contract_dicom::{
+    SeriesInstanceUid, SopClassUid, SopInstanceUid, SpecificCharacterSet,
+    SpecificCharacterSetError, StudyInstanceUid, default_repertoire_text,
+};
 use raccoon_contract_object_store::ByteStream;
 use raccoon_service_ingest::{
     IngestBatchRepositoryStatus, IngestObjectId, IngestObjectIdentity, IngestObjectOutcome,
@@ -397,7 +403,9 @@ fn replace_bulk_references_in_object(
 }
 
 fn reconstruct_dicom_file(metadata: &Value) -> Result<Vec<u8>, String> {
-    let object: InMemDicomObject = dicom_json::from_value(metadata.clone())
+    let mut metadata = metadata.clone();
+    validate_and_prepare_specific_character_set(&mut metadata)?;
+    let object: InMemDicomObject = dicom_json::from_value(metadata)
         .map_err(|error| format!("failed to parse DICOM JSON metadata: {error}"))?;
     let object = object
         .with_meta(FileMetaTableBuilder::new().transfer_syntax(uids::EXPLICIT_VR_LITTLE_ENDIAN))
@@ -407,6 +415,231 @@ fn reconstruct_dicom_file(metadata: &Value) -> Result<Vec<u8>, String> {
         .write_all(Cursor::new(&mut bytes))
         .map_err(|error| format!("failed to write DICOM file: {error}"))?;
     Ok(bytes)
+}
+
+fn validate_and_prepare_specific_character_set(metadata: &mut Value) -> Result<(), String> {
+    let charset = metadata_specific_character_set(metadata)?;
+    let contains_non_default_text = metadata_contains_non_default_text(metadata);
+    match charset {
+        Some(charset) if !charset.is_supported() => {
+            return Err(format!(
+                "unsupported Specific Character Set {} for STOW-RS metadata reconstruction",
+                charset.label()
+            ));
+        }
+        Some(charset) => {
+            validate_metadata_text_encodable(metadata, &charset)?;
+        }
+        None => {
+            if contains_non_default_text {
+                add_utf8_specific_character_set(metadata)?;
+                let charset = SpecificCharacterSet::parse_terms(["ISO_IR 192"])
+                    .map_err(specific_character_set_rejection)?;
+                validate_metadata_text_encodable(metadata, &charset)?;
+            } else {
+                validate_metadata_text_encodable(
+                    metadata,
+                    &SpecificCharacterSet::default_repertoire(),
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn metadata_specific_character_set(
+    metadata: &Value,
+) -> Result<Option<SpecificCharacterSet>, String> {
+    let Some(values) = metadata
+        .get("00080005")
+        .and_then(|element| element.get("Value"))
+        .and_then(Value::as_array)
+    else {
+        return Ok(None);
+    };
+    let mut terms = Vec::new();
+    for value in values {
+        let Some(value) = value.as_str() else {
+            return Err("Specific Character Set values must be strings".to_string());
+        };
+        terms.extend(value.split('\\').map(|term| term.trim().to_string()));
+    }
+    SpecificCharacterSet::parse_terms(terms)
+        .map(Some)
+        .map_err(specific_character_set_rejection)
+}
+
+fn specific_character_set_rejection(error: SpecificCharacterSetError) -> String {
+    format!("invalid Specific Character Set: {error}")
+}
+
+fn add_utf8_specific_character_set(metadata: &mut Value) -> Result<(), String> {
+    let object = metadata
+        .as_object_mut()
+        .ok_or_else(|| "STOW-RS DICOM JSON metadata root must be an object".to_string())?;
+    object.insert(
+        "00080005".to_string(),
+        json!({ "vr": "CS", "Value": ["ISO_IR 192"] }),
+    );
+    Ok(())
+}
+
+fn validate_metadata_text_encodable(
+    metadata: &Value,
+    charset: &SpecificCharacterSet,
+) -> Result<(), String> {
+    let Some(object) = metadata.as_object() else {
+        return Ok(());
+    };
+    for (tag, element) in object {
+        let vr = element
+            .get("vr")
+            .and_then(Value::as_str)
+            .and_then(parse_vr)
+            .or_else(|| parse_tag_key(tag).map(vr_for_tag));
+        match vr {
+            Some(VR::SQ) => {
+                if let Some(items) = element.get("Value").and_then(Value::as_array) {
+                    for item in items {
+                        validate_metadata_text_encodable(item, charset)?;
+                    }
+                }
+            }
+            Some(VR::AE | VR::LO | VR::LT | VR::PN | VR::SH | VR::ST | VR::UC | VR::UT) => {
+                validate_element_text_encodable(element, vr == Some(VR::PN), charset)?;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn validate_element_text_encodable(
+    element: &Value,
+    pn: bool,
+    charset: &SpecificCharacterSet,
+) -> Result<(), String> {
+    let Some(values) = element.get("Value").and_then(Value::as_array) else {
+        return Ok(());
+    };
+    for value in values {
+        if pn {
+            validate_pn_value_encodable(value, charset)?;
+        } else if let Some(text) = value.as_str() {
+            charset
+                .encode_text(text)
+                .map_err(|error| format!("failed to encode STOW-RS text: {error}"))?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_pn_value_encodable(
+    value: &Value,
+    charset: &SpecificCharacterSet,
+) -> Result<(), String> {
+    if let Some(text) = value.as_str() {
+        charset
+            .encode_text(text)
+            .map_err(|error| format!("failed to encode STOW-RS PN text: {error}"))?;
+        return Ok(());
+    }
+    let Some(object) = value.as_object() else {
+        return Ok(());
+    };
+    for key in ["Alphabetic", "Ideographic", "Phonetic"] {
+        if let Some(text) = object.get(key).and_then(Value::as_str) {
+            charset
+                .encode_text(text)
+                .map_err(|error| format!("failed to encode STOW-RS PN text: {error}"))?;
+        }
+    }
+    Ok(())
+}
+
+fn metadata_contains_non_default_text(metadata: &Value) -> bool {
+    let Some(object) = metadata.as_object() else {
+        return false;
+    };
+    object.iter().any(|(tag, element)| {
+        let vr = element
+            .get("vr")
+            .and_then(Value::as_str)
+            .and_then(parse_vr)
+            .or_else(|| parse_tag_key(tag).map(vr_for_tag));
+        match vr {
+            Some(VR::SQ) => element
+                .get("Value")
+                .and_then(Value::as_array)
+                .is_some_and(|items| items.iter().any(metadata_contains_non_default_text)),
+            Some(VR::AE | VR::LO | VR::LT | VR::PN | VR::SH | VR::ST | VR::UC | VR::UT) => {
+                element_text_values_contain_non_default(element, vr == Some(VR::PN))
+            }
+            _ => false,
+        }
+    })
+}
+
+fn element_text_values_contain_non_default(element: &Value, pn: bool) -> bool {
+    element
+        .get("Value")
+        .and_then(Value::as_array)
+        .is_some_and(|values| {
+            values.iter().any(|value| {
+                if pn {
+                    pn_value_contains_non_default(value)
+                } else {
+                    value
+                        .as_str()
+                        .is_some_and(|text| !default_repertoire_text(text))
+                }
+            })
+        })
+}
+
+fn pn_value_contains_non_default(value: &Value) -> bool {
+    if let Some(text) = value.as_str() {
+        return !default_repertoire_text(text);
+    }
+    value.as_object().is_some_and(|object| {
+        ["Alphabetic", "Ideographic", "Phonetic"].iter().any(|key| {
+            object
+                .get(*key)
+                .and_then(Value::as_str)
+                .is_some_and(|text| !default_repertoire_text(text))
+        })
+    })
+}
+
+fn parse_vr(value: &str) -> Option<VR> {
+    match value {
+        "AE" => Some(VR::AE),
+        "LO" => Some(VR::LO),
+        "LT" => Some(VR::LT),
+        "PN" => Some(VR::PN),
+        "SH" => Some(VR::SH),
+        "SQ" => Some(VR::SQ),
+        "ST" => Some(VR::ST),
+        "UC" => Some(VR::UC),
+        "UT" => Some(VR::UT),
+        _ => None,
+    }
+}
+
+fn parse_tag_key(value: &str) -> Option<dicom_core::Tag> {
+    if value.len() != 8 {
+        return None;
+    }
+    let group = u16::from_str_radix(&value[..4], 16).ok()?;
+    let element = u16::from_str_radix(&value[4..], 16).ok()?;
+    Some(dicom_core::Tag(group, element))
+}
+
+fn vr_for_tag(tag: dicom_core::Tag) -> VR {
+    StandardDataDictionary
+        .by_tag(tag)
+        .and_then(|entry| entry.vr().exact())
+        .unwrap_or(VR::LO)
 }
 
 fn identity_from_metadata(metadata: &Value) -> IngestObjectIdentity {
@@ -590,5 +823,117 @@ struct SpanRecord;
 impl SpanRecord {
     fn part_count(count: u64) {
         tracing::Span::current().record("dicomweb.store.part_count", count);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use dicom_object::{DicomAttribute, DicomObject};
+
+    use super::*;
+
+    fn minimal_metadata(extra: serde_json::Map<String, Value>) -> Value {
+        let mut object = serde_json::Map::from_iter([
+            (
+                "00080016".to_string(),
+                json!({"vr": "UI", "Value": ["1.2.840.10008.5.1.4.1.1.2"]}),
+            ),
+            (
+                "00080018".to_string(),
+                json!({"vr": "UI", "Value": ["1.2.3.4.5"]}),
+            ),
+            (
+                "0020000D".to_string(),
+                json!({"vr": "UI", "Value": ["1.2.3"]}),
+            ),
+            (
+                "0020000E".to_string(),
+                json!({"vr": "UI", "Value": ["1.2.3.4"]}),
+            ),
+        ]);
+        object.extend(extra);
+        Value::Object(object)
+    }
+
+    #[test]
+    fn reconstruction_adds_utf8_charset_for_non_default_text() {
+        let metadata = minimal_metadata(serde_json::Map::from_iter([(
+            "00100010".to_string(),
+            json!({"vr": "PN", "Value": [{"Alphabetic": "Café^Renée"}]}),
+        )]));
+
+        let bytes = reconstruct_dicom_file(&metadata).expect("UTF-8 metadata reconstructs");
+        let object = dicom_object::from_reader(std::io::Cursor::new(bytes))
+            .expect("reconstructed DICOM parses");
+
+        assert_eq!(
+            object
+                .attr_by_name("SpecificCharacterSet")
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .as_ref(),
+            "ISO_IR 192"
+        );
+    }
+
+    #[test]
+    fn reconstruction_rejects_default_charset_with_non_default_text() {
+        let metadata = minimal_metadata(serde_json::Map::from_iter([
+            (
+                "00080005".to_string(),
+                json!({"vr": "CS", "Value": ["ISO_IR 6"]}),
+            ),
+            (
+                "00100010".to_string(),
+                json!({"vr": "PN", "Value": [{"Alphabetic": "Café^Renée"}]}),
+            ),
+        ]));
+
+        let error = reconstruct_dicom_file(&metadata)
+            .expect_err("default repertoire cannot encode non-ASCII text");
+
+        assert!(error.contains("default repertoire"));
+    }
+
+    #[test]
+    fn reconstruction_rejects_unsupported_charset_with_non_default_text() {
+        let metadata = minimal_metadata(serde_json::Map::from_iter([
+            (
+                "00080005".to_string(),
+                json!({"vr": "CS", "Value": ["ISO 2022 IR 159"]}),
+            ),
+            (
+                "00081030".to_string(),
+                json!({"vr": "LO", "Value": ["検査"]}),
+            ),
+        ]));
+
+        let error = reconstruct_dicom_file(&metadata)
+            .expect_err("unsupported charset cannot reconstruct non-ASCII text");
+
+        assert!(error.contains("unsupported Specific Character Set"));
+    }
+
+    #[test]
+    fn reconstruction_supports_iso2022_jis_text() {
+        let metadata = minimal_metadata(serde_json::Map::from_iter([
+            (
+                "00080005".to_string(),
+                json!({"vr": "CS", "Value": ["ISO 2022 IR 87"]}),
+            ),
+            (
+                "00081030".to_string(),
+                json!({"vr": "LO", "Value": ["検査"]}),
+            ),
+        ]));
+
+        let bytes = reconstruct_dicom_file(&metadata).expect("ISO 2022 IR 87 reconstructs");
+        let object = dicom_object::from_reader(std::io::Cursor::new(bytes))
+            .expect("reconstructed DICOM parses");
+
+        let attr = object.attr_by_name("StudyDescription").unwrap();
+        let value = attr.to_str().unwrap();
+        assert!(value.starts_with("検査"), "{value}");
     }
 }

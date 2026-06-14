@@ -8,12 +8,14 @@
 //! combinations unrepresentable at the type level.
 
 mod bulk_data;
+mod charset;
 mod identity;
 mod level;
 mod metadata;
 mod uid;
 
 pub use bulk_data::is_bulk_data_element;
+pub use charset::{SpecificCharacterSet, SpecificCharacterSetError, default_repertoire_text};
 pub use identity::{DicomInstanceIdentity, DicomSeriesIdentity, DicomStudyIdentity};
 pub use level::{PatientRootQueryRetrieveLevel, StudyRootQueryRetrieveLevel};
 pub use metadata::{

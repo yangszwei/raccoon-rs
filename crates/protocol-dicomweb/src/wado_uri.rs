@@ -108,6 +108,14 @@ async fn object_response(
         .map_err(record_error)?;
     if let Some(charset) = &query.charset {
         tracing::Span::current().record("dicomweb.requested_charset", charset.as_str());
+        tracing::Span::current().record("dicomweb.charset.source", "query");
+        tracing::Span::current().record("dicomweb.charset.supported", false);
+        tracing::Span::current().record("dicomweb.charset.result", "unsupported");
+        return Err(record_error(DicomWebError::not_acceptable(
+            "WADO-URI charset recoding is not supported for native DICOM object retrieval",
+        )));
+    } else {
+        tracing::Span::current().record("dicomweb.charset.result", "pass_through");
     }
 
     let scope = RetrieveScope::Instance {
@@ -239,6 +247,9 @@ fn wado_uri_span(uri: &Uri) -> tracing::Span {
         dicomweb.requested_transfer_syntax_uid = tracing::field::Empty,
         dicomweb.stored_transfer_syntax_uid = tracing::field::Empty,
         dicomweb.requested_charset = tracing::field::Empty,
+        dicomweb.charset.source = tracing::field::Empty,
+        dicomweb.charset.supported = tracing::field::Empty,
+        dicomweb.charset.result = tracing::field::Empty,
         dicomweb.selected_media_type = tracing::field::Empty,
         dicomweb.returned_transfer_syntax_uid = tracing::field::Empty,
         dicomweb.transcode.required = tracing::field::Empty,

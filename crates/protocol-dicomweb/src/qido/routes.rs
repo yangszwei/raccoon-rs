@@ -289,6 +289,11 @@ async fn query_route_inner(
             .with_timezone_offset(timezone_offset)
             .map_err(|error| record_error(DicomWebError::bad_request(error.to_string())))?;
     }
+    if let Some(specific_character_set) = params.specific_character_set {
+        query = query
+            .with_specific_character_set(specific_character_set)
+            .map_err(|error| record_error(DicomWebError::bad_request(error.to_string())))?;
+    }
 
     let page = service.query(query).await.map_err(query_error)?;
     let url_base = DicomWebUrlBase::from_request(&headers, &uri);
@@ -355,6 +360,10 @@ fn qido_span(resource: &'static str, route: &'static str, path: &str) -> tracing
         dicomweb.query.predicate_count = tracing::field::Empty,
         dicomweb.query.fuzzy_matching = tracing::field::Empty,
         dicom.timezone_offset = tracing::field::Empty,
+        dicom.specific_character_set = tracing::field::Empty,
+        dicomweb.charset.source = tracing::field::Empty,
+        dicomweb.charset.supported = tracing::field::Empty,
+        dicomweb.charset.result = tracing::field::Empty,
         dicomweb.selected_media_type = tracing::field::Empty,
         http.response.status_code = tracing::field::Empty,
         error.type = tracing::field::Empty,
@@ -376,6 +385,15 @@ fn record_query_controls(params: &QidoQueryParams, path_predicate_count: usize) 
     span.record("dicomweb.query.fuzzy_matching", params.fuzzy_matching);
     if let Some(offset) = params.timezone_offset.as_deref() {
         span.record("dicom.timezone_offset", offset);
+    }
+    if let Some(charsets) = params.specific_character_set.as_ref() {
+        span.record("dicom.specific_character_set", charsets.join("\\"));
+        span.record("dicomweb.charset.source", "query");
+        span.record("dicomweb.charset.supported", true);
+        span.record("dicomweb.charset.result", "decoded");
+    } else {
+        span.record("dicomweb.charset.source", "absent");
+        span.record("dicomweb.charset.supported", true);
     }
 }
 

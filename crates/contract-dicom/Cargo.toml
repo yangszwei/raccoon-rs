@@ -4,4 +4,5 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+dicom-encoding = "0.9.1"
 thiserror = "2.0.18"

@@ -1934,6 +1934,7 @@ dependencies = [
 name = "raccoon-contract-dicom"
 version = "0.1.0"
 dependencies = [
+ "dicom-encoding",
  "thiserror",
 ]
 
