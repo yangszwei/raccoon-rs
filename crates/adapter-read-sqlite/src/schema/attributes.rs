@@ -98,6 +98,12 @@ pub(crate) static ATTRIBUTE_MAPPINGS: &[AttributeMapping] = &[
         vr_class: VrClass::Text,
     },
     AttributeMapping {
+        tag: tags::MODALITIES_IN_STUDY,
+        table: TableId::Study,
+        column: "modalities_in_study",
+        vr_class: VrClass::Text,
+    },
+    AttributeMapping {
         tag: tags::NUMBER_OF_STUDY_RELATED_SERIES,
         table: TableId::Study,
         column: "number_of_study_related_series",

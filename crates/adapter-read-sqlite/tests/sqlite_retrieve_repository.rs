@@ -3,7 +3,7 @@ use raccoon_contract_dicom::{
     PatientId, SeriesInstanceUid, SopClassUid, SopInstanceUid, StudyInstanceUid, TransferSyntaxUid,
 };
 use raccoon_contract_object_store::ObjectKey;
-use raccoon_service_retrieve::RetrieveRepository;
+use raccoon_service_retrieve::{MetadataRepository, RetrieveRepository, RetrieveScope};
 use sqlx::SqlitePool;
 
 async fn open_repo() -> (SqliteReadRepository, SqlitePool) {
@@ -297,4 +297,74 @@ async fn invalid_stored_metadata_returns_repository_error() {
         .expect_err("invalid object key should fail");
 
     assert!(err.to_string().contains("invalid stored retrieve metadata"));
+}
+
+#[tokio::test]
+async fn metadata_lookup_supports_study_series_and_instance_scopes() {
+    let (repo, pool) = open_repo().await;
+    insert_instance(
+        &pool,
+        "1.2.3",
+        "1.2.3.1",
+        "1.2.3.1.1",
+        "PAT-001",
+        None,
+        None,
+        None,
+    )
+    .await;
+    insert_instance(
+        &pool,
+        "1.2.3",
+        "1.2.3.2",
+        "1.2.3.2.1",
+        "PAT-001",
+        None,
+        None,
+        None,
+    )
+    .await;
+    sqlx::query("UPDATE instances SET attributes = ? WHERE sop_instance_uid = ?")
+        .bind(r#"{"00080018":{"vr":"UI","Value":["1.2.3.1.1"]}}"#)
+        .bind("1.2.3.1.1")
+        .execute(&pool)
+        .await
+        .expect("update first attributes");
+    sqlx::query("UPDATE instances SET attributes = ? WHERE sop_instance_uid = ?")
+        .bind(r#"{"00080018":{"vr":"UI","Value":["1.2.3.2.1"]}}"#)
+        .bind("1.2.3.2.1")
+        .execute(&pool)
+        .await
+        .expect("update second attributes");
+
+    let study_rows = repo
+        .find_metadata(&RetrieveScope::Study {
+            study_instance_uid: StudyInstanceUid::new("1.2.3").unwrap(),
+        })
+        .await
+        .expect("find study metadata");
+    let series_rows = repo
+        .find_metadata(&RetrieveScope::Series {
+            study_instance_uid: Some(StudyInstanceUid::new("1.2.3").unwrap()),
+            series_instance_uid: SeriesInstanceUid::new("1.2.3.2").unwrap(),
+        })
+        .await
+        .expect("find series metadata");
+    let instance_rows = repo
+        .find_metadata(&RetrieveScope::Instance {
+            study_instance_uid: Some(StudyInstanceUid::new("1.2.3").unwrap()),
+            series_instance_uid: Some(SeriesInstanceUid::new("1.2.3.1").unwrap()),
+            sop_instance_uid: SopInstanceUid::new("1.2.3.1.1").unwrap(),
+        })
+        .await
+        .expect("find instance metadata");
+
+    assert_eq!(study_rows.len(), 2);
+    assert_eq!(series_rows.len(), 1);
+    assert_eq!(
+        series_rows[0].identity.sop_instance_uid,
+        SopInstanceUid::new("1.2.3.2.1").unwrap()
+    );
+    assert_eq!(instance_rows.len(), 1);
+    assert!(instance_rows[0].attributes_json.contains("1.2.3.1.1"));
 }

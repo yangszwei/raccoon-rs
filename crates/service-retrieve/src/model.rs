@@ -37,6 +37,24 @@ pub struct InstanceRef {
     pub content_length: Option<u64>,
 }
 
+/// Stored DICOM metadata for one instance resolved from the read model.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InstanceMetadata {
+    /// Full instance identity.
+    pub identity: DicomInstanceIdentity,
+    /// Canonical DICOM JSON metadata stored in the read model.
+    pub attributes_json: String,
+}
+
+impl InstanceMetadata {
+    pub fn new(identity: DicomInstanceIdentity, attributes_json: impl Into<String>) -> Self {
+        Self {
+            identity,
+            attributes_json: attributes_json.into(),
+        }
+    }
+}
+
 impl InstanceRef {
     pub fn new(identity: DicomInstanceIdentity, object_key: ObjectKey) -> Self {
         Self {

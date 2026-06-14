@@ -1,0 +1,16 @@
+[package]
+name = "raccoon-protocol-dicomweb"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+axum = "0.8.9"
+raccoon-contract-dicom = { path = "../contract-dicom" }
+serde = { version = "1.0.228", features = ["derive"] }
+thiserror = "2.0.18"
+tracing.workspace = true
+
+[dev-dependencies]
+serde_json = "1.0"
+tokio = { version = "1.52.3", features = ["macros", "rt"] }
+tower = { version = "0.5.3", features = ["util"] }

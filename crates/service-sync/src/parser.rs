@@ -12,6 +12,7 @@ use raccoon_contract_dicom::{
 };
 use raccoon_contract_object_store::{ByteStream, Bytes, ObjectKey, Result as ObjectStoreResult};
 use raccoon_service_ingest::IngestPayloadRepresentation;
+use serde_json::{Value, json};
 use tokio::runtime::Handle;
 
 use crate::error::SyncParseError;
@@ -311,10 +312,7 @@ fn project_object(
     let instance_number = optional_i64(&object, "InstanceNumber")?;
     let acquisition_date_time = optional_text(&object, "AcquisitionDateTime");
 
-    let attributes_json =
-        serde_json::to_string(&dicom_json::DicomJson::from(object)).map_err(|error| {
-            SyncParseError::cannot_understand(format!("failed to serialize DICOM JSON: {error}"))
-        })?;
+    let attributes_json = normalized_attributes_json(&object)?;
 
     Ok(ParsedSyncObject {
         study: SyncStudyRecord {
@@ -357,6 +355,88 @@ fn project_object(
     })
 }
 
+fn normalized_attributes_json(object: &InMemDicomObject) -> Result<String, SyncParseError> {
+    let mut value = serde_json::to_value(dicom_json::DicomJson::from(object)).map_err(|error| {
+        SyncParseError::cannot_understand(format!("failed to serialize DICOM JSON: {error}"))
+    })?;
+    let object = value.as_object_mut().ok_or_else(|| {
+        SyncParseError::cannot_understand("DICOM JSON root is not an object".to_string())
+    })?;
+    normalize_attributes_object(object, None);
+    serde_json::to_string(&value).map_err(|error| {
+        SyncParseError::cannot_understand(format!("failed to serialize DICOM JSON: {error}"))
+    })
+}
+
+fn normalize_attributes_object(
+    object: &mut serde_json::Map<String, Value>,
+    parent_sequence: Option<&str>,
+) {
+    let tags = object.keys().cloned().collect::<Vec<_>>();
+    for tag in tags {
+        if tag.starts_with("0002") || is_pixel_data_tag(&tag) {
+            object.remove(&tag);
+            continue;
+        }
+
+        if let Some(items) = object
+            .get_mut(&tag)
+            .and_then(|element| element.get_mut("Value"))
+            .and_then(Value::as_array_mut)
+        {
+            for item in items {
+                if let Some(item_object) = item.as_object_mut() {
+                    normalize_attributes_object(item_object, Some(tag.as_str()));
+                }
+            }
+        }
+
+        if is_bulk_data_marker_tag(&tag, parent_sequence) {
+            let vr = object
+                .get(&tag)
+                .and_then(|element| element.get("vr"))
+                .cloned()
+                .unwrap_or_else(|| json!("UN"));
+            object.insert(tag, json!({ "vr": vr }));
+        }
+    }
+}
+
+fn is_pixel_data_tag(tag: &str) -> bool {
+    matches!(tag, "7FE00008" | "7FE00009" | "7FE00010")
+}
+
+fn is_bulk_data_marker_tag(tag: &str, parent_sequence: Option<&str>) -> bool {
+    if parent_sequence == Some("54000100") && tag == "54001010" {
+        return true;
+    }
+    match tag {
+        "00281201" | "00281202" | "00281203" | "00281204" | "00281211" | "00281212"
+        | "00281213" | "00281221" | "00281222" | "00281223" | "00281224" | "00283006"
+        | "00287FE0" | "00420011" | "56000020" => true,
+        _ => is_repeating_group_bulk_data_tag(tag),
+    }
+}
+
+fn is_repeating_group_bulk_data_tag(tag: &str) -> bool {
+    let Some((group, element)) = tag_group_element(tag) else {
+        return false;
+    };
+    matches!(
+        (group, element),
+        (0x5000..=0x50FF, 0x200C | 0x3000) | (0x6000..=0x60FF, 0x3000)
+    )
+}
+
+fn tag_group_element(tag: &str) -> Option<(u16, u16)> {
+    if tag.len() != 8 {
+        return None;
+    }
+    let group = u16::from_str_radix(&tag[..4], 16).ok()?;
+    let element = u16::from_str_radix(&tag[4..], 16).ok()?;
+    Some((group, element))
+}
+
 fn required_text(object: &InMemDicomObject, name: &'static str) -> Result<String, SyncParseError> {
     optional_text(object, name)
         .filter(|value| !value.is_empty())
@@ -396,7 +476,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use dicom_core::{DataElement, VR};
+    use dicom_core::{DataElement, Length, PrimitiveValue, Tag, VR};
     use dicom_dictionary_std::tags;
     use serde_json::Value;
 
@@ -448,6 +528,16 @@ mod tests {
         object.put(DataElement::new(tags::PATIENT_ID, VR::LO, "P1"));
         object.put(DataElement::new(tags::MODALITY, VR::CS, "CT"));
         object.put(DataElement::new(tags::INSTANCE_NUMBER, VR::IS, "7"));
+        object.put(DataElement::new(
+            Tag(0x0002, 0x0010),
+            VR::UI,
+            "1.2.840.10008.1.2.1",
+        ));
+        object.put(DataElement::new(
+            tags::LUT_DATA,
+            VR::OW,
+            PrimitiveValue::from([1_u16, 2, 3]),
+        ));
 
         let parsed = project_object(
             object,
@@ -462,7 +552,81 @@ mod tests {
         assert_eq!(parsed.instance.instance_number, Some(7));
         let json: Value = serde_json::from_str(&parsed.instance.attributes_json).unwrap();
         assert!(json.get("00100020").is_some());
+        assert!(json.get("00020010").is_none());
         assert!(json.get("7FE00010").is_none());
+        assert_eq!(json["00283006"]["vr"], "OW");
+        assert!(json["00283006"].get("Value").is_none());
+        assert!(json["00283006"].get("InlineBinary").is_none());
+        assert!(json["00283006"].get("BulkDataURI").is_none());
+    }
+
+    #[test]
+    fn projection_removes_pixel_data_and_marks_nested_bulk_attributes() {
+        let mut lut_item = InMemDicomObject::new_empty();
+        lut_item.put(DataElement::new(
+            tags::LUT_DATA,
+            VR::OW,
+            PrimitiveValue::from([1_u16, 2, 3]),
+        ));
+        let mut object = InMemDicomObject::from_element_iter([
+            DataElement::new(tags::STUDY_INSTANCE_UID, VR::UI, "1.2.3"),
+            DataElement::new(tags::SERIES_INSTANCE_UID, VR::UI, "1.2.3.4"),
+            DataElement::new(tags::SOP_INSTANCE_UID, VR::UI, "1.2.3.4.5"),
+            DataElement::new(tags::SOP_CLASS_UID, VR::UI, "1.2.840.10008.5.1.4.1.1.2"),
+            DataElement::new(
+                tags::VOILUT_SEQUENCE,
+                VR::SQ,
+                dicom_core::value::Value::new_sequence(vec![lut_item], Length::UNDEFINED),
+            ),
+        ]);
+        object.put(DataElement::new(
+            tags::PIXEL_DATA,
+            VR::OB,
+            PrimitiveValue::from(vec![0_u8, 1, 2]),
+        ));
+
+        let parsed = project_object(
+            object,
+            ObjectKey::new("ingest/1").unwrap(),
+            42,
+            Some("1.2.840.10008.1.2.1".to_string()),
+        )
+        .expect("valid object projects");
+
+        let json: Value = serde_json::from_str(&parsed.instance.attributes_json).unwrap();
+        assert!(json.get("7FE00010").is_none());
+        let nested = &json["00283010"]["Value"][0]["00283006"];
+        assert_eq!(nested["vr"], "OW");
+        assert!(nested.get("Value").is_none());
+        assert!(nested.get("InlineBinary").is_none());
+        assert!(nested.get("BulkDataURI").is_none());
+    }
+
+    #[test]
+    fn repeating_group_bulk_attributes_are_marked_vr_only() {
+        let object = InMemDicomObject::from_element_iter([
+            DataElement::new(tags::STUDY_INSTANCE_UID, VR::UI, "1.2.3"),
+            DataElement::new(tags::SERIES_INSTANCE_UID, VR::UI, "1.2.3.4"),
+            DataElement::new(tags::SOP_INSTANCE_UID, VR::UI, "1.2.3.4.5"),
+            DataElement::new(tags::SOP_CLASS_UID, VR::UI, "1.2.840.10008.5.1.4.1.1.2"),
+            DataElement::new(
+                Tag(0x6000, 0x3000),
+                VR::OW,
+                PrimitiveValue::from([9_u16, 10]),
+            ),
+        ]);
+
+        let parsed = project_object(
+            object,
+            ObjectKey::new("ingest/1").unwrap(),
+            42,
+            Some("1.2.840.10008.1.2.1".to_string()),
+        )
+        .expect("valid object projects");
+
+        let json: Value = serde_json::from_str(&parsed.instance.attributes_json).unwrap();
+        assert_eq!(json["60003000"]["vr"], "OW");
+        assert!(json["60003000"].get("Value").is_none());
     }
 
     #[test]

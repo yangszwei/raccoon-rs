@@ -6,7 +6,10 @@ use raccoon_contract_dicom::{
 };
 use raccoon_contract_object_store::ObjectKey;
 use raccoon_service_query::{DicomQuery, QueryPage, QueryRepository, QueryRepositoryError};
-use raccoon_service_retrieve::{InstanceRef, RetrieveRepository, RetrieveRepositoryError};
+use raccoon_service_retrieve::{
+    InstanceMetadata, InstanceRef, MetadataRepository, RetrieveRepository, RetrieveRepositoryError,
+    RetrieveScope,
+};
 use raccoon_service_sync::{SyncReadModelWriter, SyncRepositoryError, SyncedReadModelObject};
 use sqlx::{
     Row, SqlitePool,
@@ -332,6 +335,155 @@ impl RetrieveRepository for SqliteReadRepository {
 }
 
 #[async_trait]
+impl MetadataRepository for SqliteReadRepository {
+    #[instrument(
+        skip_all,
+        fields(
+            db.system = "sqlite",
+            retrieve.scope = scope.label(),
+            metadata.row_count = tracing::field::Empty,
+            error.type = tracing::field::Empty,
+        )
+    )]
+    async fn find_metadata(
+        &self,
+        scope: &RetrieveScope,
+    ) -> Result<Vec<InstanceMetadata>, RetrieveRepositoryError> {
+        let rows = match scope {
+            RetrieveScope::Patient { patient_id } => {
+                sqlx::query(
+                    "SELECT i.study_instance_uid, i.series_instance_uid, i.sop_instance_uid, \
+                            i.sop_class_uid, i.attributes \
+                     FROM instances i \
+                     INNER JOIN studies st ON st.study_instance_uid = i.study_instance_uid \
+                     WHERE st.patient_id = ? \
+                     ORDER BY i.study_instance_uid, i.series_instance_uid, i.sop_instance_uid",
+                )
+                .bind(patient_id.as_str())
+                .fetch_all(&self.pool)
+                .await
+            }
+            RetrieveScope::Study { study_instance_uid } => {
+                sqlx::query(
+                    "SELECT study_instance_uid, series_instance_uid, sop_instance_uid, \
+                            sop_class_uid, attributes \
+                     FROM instances \
+                     WHERE study_instance_uid = ? \
+                     ORDER BY series_instance_uid, sop_instance_uid",
+                )
+                .bind(study_instance_uid.as_str())
+                .fetch_all(&self.pool)
+                .await
+            }
+            RetrieveScope::Series {
+                study_instance_uid: Some(study_uid),
+                series_instance_uid,
+            } => {
+                sqlx::query(
+                    "SELECT study_instance_uid, series_instance_uid, sop_instance_uid, \
+                            sop_class_uid, attributes \
+                     FROM instances \
+                     WHERE study_instance_uid = ? AND series_instance_uid = ? \
+                     ORDER BY sop_instance_uid",
+                )
+                .bind(study_uid.as_str())
+                .bind(series_instance_uid.as_str())
+                .fetch_all(&self.pool)
+                .await
+            }
+            RetrieveScope::Series {
+                study_instance_uid: None,
+                series_instance_uid,
+            } => {
+                sqlx::query(
+                    "SELECT study_instance_uid, series_instance_uid, sop_instance_uid, \
+                            sop_class_uid, attributes \
+                     FROM instances \
+                     WHERE series_instance_uid = ? \
+                     ORDER BY sop_instance_uid",
+                )
+                .bind(series_instance_uid.as_str())
+                .fetch_all(&self.pool)
+                .await
+            }
+            RetrieveScope::Instance {
+                study_instance_uid: Some(study_uid),
+                series_instance_uid: Some(series_uid),
+                sop_instance_uid,
+            } => {
+                sqlx::query(
+                    "SELECT study_instance_uid, series_instance_uid, sop_instance_uid, \
+                            sop_class_uid, attributes \
+                     FROM instances \
+                     WHERE study_instance_uid = ? AND series_instance_uid = ? \
+                       AND sop_instance_uid = ?",
+                )
+                .bind(study_uid.as_str())
+                .bind(series_uid.as_str())
+                .bind(sop_instance_uid.as_str())
+                .fetch_all(&self.pool)
+                .await
+            }
+            RetrieveScope::Instance {
+                study_instance_uid: Some(study_uid),
+                series_instance_uid: None,
+                sop_instance_uid,
+            } => {
+                sqlx::query(
+                    "SELECT study_instance_uid, series_instance_uid, sop_instance_uid, \
+                            sop_class_uid, attributes \
+                     FROM instances \
+                     WHERE study_instance_uid = ? AND sop_instance_uid = ?",
+                )
+                .bind(study_uid.as_str())
+                .bind(sop_instance_uid.as_str())
+                .fetch_all(&self.pool)
+                .await
+            }
+            RetrieveScope::Instance {
+                study_instance_uid: None,
+                series_instance_uid: Some(series_uid),
+                sop_instance_uid,
+            } => {
+                sqlx::query(
+                    "SELECT study_instance_uid, series_instance_uid, sop_instance_uid, \
+                            sop_class_uid, attributes \
+                     FROM instances \
+                     WHERE series_instance_uid = ? AND sop_instance_uid = ?",
+                )
+                .bind(series_uid.as_str())
+                .bind(sop_instance_uid.as_str())
+                .fetch_all(&self.pool)
+                .await
+            }
+            RetrieveScope::Instance {
+                study_instance_uid: None,
+                series_instance_uid: None,
+                sop_instance_uid,
+            } => {
+                sqlx::query(
+                    "SELECT study_instance_uid, series_instance_uid, sop_instance_uid, \
+                            sop_class_uid, attributes \
+                     FROM instances \
+                     WHERE sop_instance_uid = ?",
+                )
+                .bind(sop_instance_uid.as_str())
+                .fetch_all(&self.pool)
+                .await
+            }
+        }
+        .map_err(retrieve_query_error)?;
+
+        Span::current().record("metadata.row_count", rows.len());
+
+        rows.into_iter()
+            .map(materialize_instance_metadata)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+}
+
+#[async_trait]
 impl SyncReadModelWriter for SqliteReadRepository {
     #[instrument(
         skip_all,
@@ -547,6 +699,22 @@ fn materialize_instance_ref(
         object_key,
         content_length,
     })
+}
+
+fn materialize_instance_metadata(
+    row: sqlx::sqlite::SqliteRow,
+) -> Result<InstanceMetadata, SqliteReadRepositoryError> {
+    let identity = DicomInstanceIdentity::new(
+        parse_uid(&row, "study_instance_uid")?,
+        parse_uid(&row, "series_instance_uid")?,
+        parse_uid(&row, "sop_instance_uid")?,
+        parse_uid(&row, "sop_class_uid")?,
+    );
+    let attributes_json = row
+        .try_get::<String, _>("attributes")
+        .map_err(|e| SqliteReadRepositoryError::RowRead("attributes".to_owned(), e))?;
+
+    Ok(InstanceMetadata::new(identity, attributes_json))
 }
 
 fn parse_uid<T>(row: &sqlx::sqlite::SqliteRow, column: &str) -> Result<T, SqliteReadRepositoryError>

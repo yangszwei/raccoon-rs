@@ -4,7 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 use raccoon_contract_object_store::{ByteStream, ObjectKey, ObjectStore};
 use tokio_util::sync::CancellationToken;
-use tracing::{instrument, warn};
+use tracing::{Span, instrument, warn};
 
 use crate::error::{QuarantineError, SyncError, SyncParseError, SyncTerminalObjectError};
 use crate::model::{
@@ -183,10 +183,23 @@ enum ClaimOutcome {
 }
 
 impl StandardSyncService {
+    #[instrument(
+        skip(self, claim),
+        fields(
+            sync.object_key = %claim.object_key,
+            sync.sop_class_uid = tracing::field::Empty,
+            sync.sop_instance_uid = tracing::field::Empty,
+            sync.study_instance_uid = tracing::field::Empty,
+            sync.series_instance_uid = tracing::field::Empty,
+            sync.transfer_syntax_uid = tracing::field::Empty,
+            error.type = tracing::field::Empty,
+        )
+    )]
     async fn process_claim(&self, claim: ClaimedSyncObject) -> ClaimOutcome {
         let object = match self.object_store.get(&claim.object_key).await {
             Ok(object) => object,
             Err(error) => {
+                Span::current().record("error.type", "object_store_read");
                 warn!(error = %error, "object store read failed; claim will be retried");
                 self.release_retryable(&claim).await;
                 return ClaimOutcome::Retryable;
@@ -207,11 +220,13 @@ impl StandardSyncService {
         {
             Ok(parsed) => parsed,
             Err(SyncParseError::ParserTask(ref msg)) => {
+                Span::current().record("error.type", "sync_parse::parser_task");
                 warn!(error = %msg, "DICOM parser task failed; claim will be retried");
                 self.release_retryable(&claim).await;
                 return ClaimOutcome::Retryable;
             }
             Err(SyncParseError::MetadataTooLarge { max_metadata_bytes }) => {
+                Span::current().record("error.type", "sync_parse::metadata_too_large");
                 let error = SyncTerminalObjectError::Policy {
                     reason: format!(
                         "DICOM metadata exceeded configured maximum of {max_metadata_bytes} bytes; \
@@ -229,6 +244,7 @@ impl StandardSyncService {
                 };
             }
             Err(error) => {
+                Span::current().record("error.type", parse_error_kind(&error));
                 return match self.quarantine_terminal_failure(&claim, error.into()).await {
                     Ok(()) => ClaimOutcome::Quarantined,
                     Err(error) => {
@@ -239,6 +255,22 @@ impl StandardSyncService {
                 };
             }
         };
+
+        let identity = &parsed.instance.identity;
+        let span = Span::current();
+        span.record("sync.sop_class_uid", identity.sop_class_uid.as_str());
+        span.record("sync.sop_instance_uid", identity.sop_instance_uid.as_str());
+        span.record(
+            "sync.study_instance_uid",
+            identity.study_instance_uid.as_str(),
+        );
+        span.record(
+            "sync.series_instance_uid",
+            identity.series_instance_uid.as_str(),
+        );
+        if let Some(transfer_syntax_uid) = &parsed.instance.transfer_syntax_uid {
+            span.record("sync.transfer_syntax_uid", transfer_syntax_uid.as_str());
+        }
 
         let read_model = read_model_object(parsed, now_unix_ms());
 
@@ -306,6 +338,15 @@ impl StandardSyncService {
         {
             warn!(error = %error, claim_token = %claim.claim_token, "failed to release sync claim");
         }
+    }
+}
+
+fn parse_error_kind(error: &SyncParseError) -> &'static str {
+    match error {
+        SyncParseError::CannotUnderstand { .. } => "sync_parse::cannot_understand",
+        SyncParseError::Validation { .. } => "sync_parse::validation",
+        SyncParseError::ParserTask(_) => "sync_parse::parser_task",
+        SyncParseError::MetadataTooLarge { .. } => "sync_parse::metadata_too_large",
     }
 }
 

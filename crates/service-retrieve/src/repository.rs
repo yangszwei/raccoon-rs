@@ -2,7 +2,8 @@ use async_trait::async_trait;
 use raccoon_contract_dicom::{PatientId, SeriesInstanceUid, SopInstanceUid, StudyInstanceUid};
 
 use crate::error::RetrieveRepositoryError;
-use crate::model::InstanceRef;
+use crate::model::{InstanceMetadata, InstanceRef};
+use crate::scope::RetrieveScope;
 
 /// Read-side repository contract for DICOM instance location lookup.
 ///
@@ -80,4 +81,19 @@ pub trait RetrieveRepository: Send + Sync {
                 && series_uid.is_none_or(|uid| ref_.identity.series_instance_uid == *uid)
         }))
     }
+}
+
+/// Read-side repository contract for WADO-RS metadata lookup.
+///
+/// Implementors resolve a retrieve scope to the stored, canonical DICOM JSON
+/// metadata for each matching instance. This path intentionally avoids object
+/// store reads; object bytes are only needed by full retrieve/render paths.
+#[async_trait]
+pub trait MetadataRepository: Send + Sync {
+    /// Returns metadata rows matching the given retrieve scope in stable
+    /// response order. A missing resource returns an empty vector.
+    async fn find_metadata(
+        &self,
+        scope: &RetrieveScope,
+    ) -> Result<Vec<InstanceMetadata>, RetrieveRepositoryError>;
 }

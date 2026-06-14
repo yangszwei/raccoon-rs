@@ -170,15 +170,7 @@ fn read_indexed_value(
 ) -> Result<ResponseValue, SqliteReadRepositoryError> {
     let col = mapping.column;
     match mapping.vr_class {
-        VrClass::Text => {
-            let v: Option<String> = row
-                .try_get(col)
-                .map_err(|e| SqliteReadRepositoryError::RowRead(col.to_string(), e))?;
-            Ok(match v.as_deref() {
-                None | Some("") => ResponseValue::ZeroLength,
-                Some(s) => ResponseValue::Present(AttributeValue::Text(s.to_string())),
-            })
-        }
+        VrClass::Text => read_text_column(row, col),
         VrClass::Integer => {
             let v: Option<i64> = row
                 .try_get(col)
@@ -189,6 +181,19 @@ fn read_indexed_value(
             })
         }
     }
+}
+
+fn read_text_column(
+    row: &sqlx::sqlite::SqliteRow,
+    col: &str,
+) -> Result<ResponseValue, SqliteReadRepositoryError> {
+    let v: Option<String> = row
+        .try_get(col)
+        .map_err(|e| SqliteReadRepositoryError::RowRead(col.to_string(), e))?;
+    Ok(match v.as_deref() {
+        None | Some("") => ResponseValue::ZeroLength,
+        Some(s) => ResponseValue::Present(AttributeValue::Text(s.to_string())),
+    })
 }
 
 fn element_to_response_value(element: &dicom_object::mem::InMemElement) -> ResponseValue {
@@ -279,6 +284,8 @@ fn mandatory_tags_for_scope(scope: QueryScope) -> Vec<Tag> {
             tags::STUDY_DATE,
             tags::STUDY_TIME,
             tags::ACCESSION_NUMBER,
+            tags::MODALITIES_IN_STUDY,
+            tags::REFERRING_PHYSICIAN_NAME,
             tags::STUDY_ID,
             tags::STUDY_DESCRIPTION,
             tags::NUMBER_OF_STUDY_RELATED_SERIES,

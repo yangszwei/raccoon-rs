@@ -24,7 +24,7 @@ pub use grpc::{
     DicomRetrieveService, DicomRetrieveServiceClient, DicomRetrieveServiceServer,
     GrpcRetrieveServiceClient, RetrieveGrpcService,
 };
-pub use model::{InstanceRef, RetrieveResult, RetrieveStream, RetrievedInstance};
-pub use repository::RetrieveRepository;
+pub use model::{InstanceMetadata, InstanceRef, RetrieveResult, RetrieveStream, RetrievedInstance};
+pub use repository::{MetadataRepository, RetrieveRepository};
 pub use scope::{RetrieveRequest, RetrieveScope};
 pub use service::{RetrieveService, StandardRetrieveService};

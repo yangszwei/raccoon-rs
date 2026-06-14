@@ -165,6 +165,130 @@ async fn study_scope_returns_one_row_per_study_uid() {
 }
 
 #[tokio::test]
+async fn study_scope_projects_derived_counts_and_modalities() {
+    let (repo, pool) = open_repo().await;
+
+    insert_instance(
+        &pool,
+        "1.2.3",
+        "1.2.3.1",
+        "1.2.3.1.1",
+        "1.2.840.10008.5.1.4.1.1.4",
+        "PAT-001",
+        "DOE",
+        "20260101",
+        "MR",
+        Some(1),
+        &empty_attrs(),
+    )
+    .await;
+    insert_instance(
+        &pool,
+        "1.2.3",
+        "1.2.3.1",
+        "1.2.3.1.2",
+        "1.2.840.10008.5.1.4.1.1.4",
+        "PAT-001",
+        "DOE",
+        "20260101",
+        "MR",
+        Some(2),
+        &empty_attrs(),
+    )
+    .await;
+    insert_instance(
+        &pool,
+        "1.2.3",
+        "1.2.3.2",
+        "1.2.3.2.1",
+        "1.2.840.10008.5.1.4.1.1.2",
+        "PAT-001",
+        "DOE",
+        "20260101",
+        "CT",
+        Some(1),
+        &empty_attrs(),
+    )
+    .await;
+
+    let query = DicomQuery::new(
+        QueryScope::StudyRoot(StudyRootQueryRetrieveLevel::Study),
+        Projection::Fields(vec![
+            AttributePath::from_tag(tags::MODALITIES_IN_STUDY),
+            AttributePath::from_tag(tags::NUMBER_OF_STUDY_RELATED_SERIES),
+            AttributePath::from_tag(tags::NUMBER_OF_STUDY_RELATED_INSTANCES),
+        ]),
+    )
+    .expect("valid query");
+
+    let page = repo.execute(&query).await.expect("execute");
+
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(
+        present_text(find_attr(&page, 0, tags::MODALITIES_IN_STUDY).unwrap()),
+        "CT\\MR"
+    );
+    assert_eq!(
+        present_text(find_attr(&page, 0, tags::NUMBER_OF_STUDY_RELATED_SERIES).unwrap()),
+        "2"
+    );
+    assert_eq!(
+        present_text(find_attr(&page, 0, tags::NUMBER_OF_STUDY_RELATED_INSTANCES).unwrap()),
+        "3"
+    );
+}
+
+#[tokio::test]
+async fn series_scope_projects_derived_instance_count() {
+    let (repo, pool) = open_repo().await;
+
+    insert_instance(
+        &pool,
+        "1.2.3",
+        "1.2.3.1",
+        "1.2.3.1.1",
+        "1.2.840.10008.5.1.4.1.1.4",
+        "PAT-001",
+        "DOE",
+        "20260101",
+        "MR",
+        Some(1),
+        &empty_attrs(),
+    )
+    .await;
+    insert_instance(
+        &pool,
+        "1.2.3",
+        "1.2.3.1",
+        "1.2.3.1.2",
+        "1.2.840.10008.5.1.4.1.1.4",
+        "PAT-001",
+        "DOE",
+        "20260101",
+        "MR",
+        Some(2),
+        &empty_attrs(),
+    )
+    .await;
+
+    let query = DicomQuery::new(
+        QueryScope::StudyRoot(StudyRootQueryRetrieveLevel::Series),
+        Projection::Fields(vec![AttributePath::from_tag(
+            tags::NUMBER_OF_SERIES_RELATED_INSTANCES,
+        )]),
+    )
+    .expect("valid query");
+
+    let page = repo.execute(&query).await.expect("execute");
+
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(
+        present_text(find_attr(&page, 0, tags::NUMBER_OF_SERIES_RELATED_INSTANCES).unwrap()),
+        "2"
+    );
+}
+
+#[tokio::test]
 async fn series_scope_returns_one_row_per_series() {
     let (repo, pool) = open_repo().await;
 

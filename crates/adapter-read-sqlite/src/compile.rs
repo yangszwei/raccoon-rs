@@ -21,6 +21,7 @@ use dicom_core::Tag;
 use dicom_core::VR;
 use dicom_core::dictionary::{DataDictionary, DataDictionaryEntry};
 use dicom_dictionary_std::StandardDataDictionary;
+use dicom_dictionary_std::tags;
 use raccoon_service_query::{
     AttributePath, AttributePathSegment, MatchingRule, PatientRootQueryRetrieveLevel, Predicate,
     QueryScope, SortDirection, SortKey, StudyRootQueryRetrieveLevel,
@@ -28,7 +29,7 @@ use raccoon_service_query::{
 use raccoon_service_query::{DicomQuery, QueryPaging};
 
 use crate::error::SqliteReadRepositoryError;
-use crate::schema::{ATTRIBUTE_MAPPINGS, AttributeRegistry};
+use crate::schema::{ATTRIBUTE_MAPPINGS, AttributeMapping, AttributeRegistry};
 
 #[derive(Debug, Clone)]
 pub(crate) enum BindValue {
@@ -97,10 +98,7 @@ pub(crate) fn compile(
 /// [`ATTRIBUTE_MAPPINGS`] order, then `i.attributes`, then the three
 /// aliased sync timestamps used for ORDER BY stability.
 fn select_list() -> String {
-    let mut cols: Vec<String> = ATTRIBUTE_MAPPINGS
-        .iter()
-        .map(|m| format!("{}.{}", m.table.alias(), m.column))
-        .collect();
+    let mut cols: Vec<String> = ATTRIBUTE_MAPPINGS.iter().map(select_expr).collect();
     cols.push("i.attributes".to_string());
     // Aliased so all three can be SELECTed without name collisions.
     // These are infrastructure columns (not DICOM attributes) so they are not
@@ -109,6 +107,22 @@ fn select_list() -> String {
     cols.push("se.synced_at_unix_ms AS se_synced_at".to_string());
     cols.push("i.synced_at_unix_ms  AS i_synced_at".to_string());
     cols.join(", ")
+}
+
+/// Builds the SQL expression for one indexed DICOM attribute.
+///
+/// Most indexed attributes are stored directly on the normalized tables. The
+/// DICOM relationship count attributes are derived from child rows so they stay
+/// correct even though the sync pipeline does not persist denormalized counts.
+fn select_expr(mapping: &AttributeMapping) -> String {
+    match mapping.tag {
+        tags::NUMBER_OF_STUDY_RELATED_SERIES | tags::NUMBER_OF_STUDY_RELATED_INSTANCES => {
+            format!("sc.{0} AS {0}", mapping.column)
+        }
+        tags::MODALITIES_IN_STUDY => format!("sm.{0} AS {0}", mapping.column),
+        tags::NUMBER_OF_SERIES_RELATED_INSTANCES => format!("sec.{0} AS {0}", mapping.column),
+        _ => format!("{}.{}", mapping.table.alias(), mapping.column),
+    }
 }
 
 fn build_sql(
@@ -147,10 +161,40 @@ fn build_sql(
     let dedup_expr = dedup_col.as_deref().unwrap_or("");
 
     let base_cte = format!(
-        "WITH _base AS (SELECT {select}{dedup_expr} \
+        "WITH \
+         _study_counts AS (\
+             SELECT s_count.study_instance_uid, \
+                    COUNT(DISTINCT se_count.series_instance_uid) AS number_of_study_related_series, \
+                    COUNT(DISTINCT i_count.sop_instance_uid) AS number_of_study_related_instances \
+             FROM studies s_count \
+             LEFT JOIN series se_count ON se_count.study_instance_uid = s_count.study_instance_uid \
+             LEFT JOIN instances i_count ON i_count.study_instance_uid = s_count.study_instance_uid \
+             GROUP BY s_count.study_instance_uid\
+         ), \
+         _series_counts AS (\
+             SELECT se_count.series_instance_uid, \
+                    COUNT(i_count.sop_instance_uid) AS number_of_series_related_instances \
+             FROM series se_count \
+             LEFT JOIN instances i_count ON i_count.series_instance_uid = se_count.series_instance_uid \
+             GROUP BY se_count.series_instance_uid\
+         ), \
+         _study_modalities AS (\
+             SELECT study_instance_uid, GROUP_CONCAT(modality, '\\') AS modalities_in_study \
+             FROM (\
+                 SELECT DISTINCT study_instance_uid, modality \
+                 FROM series \
+                 WHERE modality IS NOT NULL AND modality <> '' \
+                 ORDER BY study_instance_uid, modality\
+             ) \
+             GROUP BY study_instance_uid\
+         ), \
+         _base AS (SELECT {select}{dedup_expr} \
          FROM instances i \
          JOIN series se ON se.series_instance_uid = i.series_instance_uid \
-         JOIN studies s ON s.study_instance_uid = se.study_instance_uid\
+         JOIN studies s ON s.study_instance_uid = se.study_instance_uid \
+         LEFT JOIN _study_counts sc ON sc.study_instance_uid = s.study_instance_uid \
+         LEFT JOIN _series_counts sec ON sec.series_instance_uid = se.series_instance_uid \
+         LEFT JOIN _study_modalities sm ON sm.study_instance_uid = s.study_instance_uid \
          {where_clause})"
     );
 
@@ -769,9 +813,14 @@ mod tests {
         let query = DicomQuery::new(study_scope(), Projection::Default).expect("valid query");
         let compiled = compile_ok(&query, &registry());
 
-        // Without a predicate the only WHERE must be the dedup filter, not a user predicate.
-        let sql_without_dedup_filter = compiled.sql.replace("WHERE _rn = 1", "");
-        assert!(!sql_without_dedup_filter.contains("WHERE"));
+        // Without a predicate the joined base query must not receive a user
+        // WHERE clause. Derived fields may still use internal WHERE clauses in
+        // their own CTEs.
+        assert!(
+            !compiled
+                .sql
+                .contains("JOIN studies s ON s.study_instance_uid = se.study_instance_uid WHERE")
+        );
         assert!(compiled.sql.contains("ROW_NUMBER()"));
         assert!(compiled.sql.contains("PARTITION BY s.study_instance_uid"));
         assert!(compiled.sql.contains("s_synced_at DESC"));
