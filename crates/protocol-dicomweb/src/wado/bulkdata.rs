@@ -20,8 +20,6 @@ use crate::media::{
 };
 use crate::{DicomWebError, DicomWebState, DicomWebUrlBase, FrameList};
 
-const BOUNDARY: &str = "raccoon-dicomweb-bulkdata-boundary";
-
 #[derive(Debug, Clone)]
 struct BulkPart {
     identity: DicomInstanceIdentity,
@@ -186,8 +184,9 @@ fn multipart_octet_stream_response(
 ) -> Result<Response, DicomWebError> {
     let mut body = Vec::new();
     let base = DicomWebUrlBase::from_request(headers, uri);
+    let boundary = media::multipart_boundary();
     for part in parts {
-        body.extend_from_slice(format!("--{BOUNDARY}\r\n").as_bytes());
+        body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
         body.extend_from_slice(b"Content-Type: application/octet-stream\r\n");
         body.extend_from_slice(
             format!(
@@ -199,10 +198,10 @@ fn multipart_octet_stream_response(
         body.extend_from_slice(&part.bytes);
         body.extend_from_slice(b"\r\n");
     }
-    body.extend_from_slice(format!("--{BOUNDARY}--\r\n").as_bytes());
+    body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
     Ok(media::multipart_related_response(
         Body::from(body),
-        BOUNDARY,
+        &boundary,
         MediaType::OctetStream,
         None,
     ))

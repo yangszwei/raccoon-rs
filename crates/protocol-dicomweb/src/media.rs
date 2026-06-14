@@ -5,6 +5,7 @@ use axum::body::Body;
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use raccoon_contract_dicom::TransferSyntaxUid;
+use uuid::Uuid;
 
 use crate::DicomWebError;
 
@@ -257,6 +258,10 @@ pub fn dicom_json_response(body: impl Into<Body>) -> Response {
         content_type(MediaType::ApplicationDicomJson, &MediaTypeParams::default()),
         body,
     )
+}
+
+pub fn multipart_boundary() -> String {
+    Uuid::new_v4().to_string()
 }
 
 pub fn multipart_related_response(
@@ -618,6 +623,16 @@ mod tests {
             value,
             "multipart/related; type=\"application/dicom\"; transfer-syntax=\"1.2.840.10008.1.2.1\""
         );
+    }
+
+    #[test]
+    fn multipart_boundary_generates_uuid_tokens() {
+        let first = multipart_boundary();
+        let second = multipart_boundary();
+
+        assert_ne!(first, second);
+        uuid::Uuid::parse_str(&first).expect("first boundary is UUID");
+        uuid::Uuid::parse_str(&second).expect("second boundary is UUID");
     }
 
     #[test]

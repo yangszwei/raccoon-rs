@@ -15,8 +15,6 @@ use crate::media::{self, MediaType, MediaTypeParams, SelectedRepresentation};
 use crate::wado::{record_scope, scope};
 use crate::{DicomWebError, DicomWebRouteRegistry, DicomWebState, FrameList};
 
-const BOUNDARY: &str = "raccoon-dicomweb-rendered-boundary";
-
 pub(crate) fn register(registry: &mut DicomWebRouteRegistry) {
     registry.route("/studies/{study}/rendered", get(study_rendered));
     registry.route("/studies/{study}/thumbnail", get(study_thumbnail));
@@ -337,16 +335,17 @@ fn multipart_image_response(
     media_type: &str,
 ) -> Result<Response, DicomWebError> {
     let mut body = Vec::new();
+    let boundary = media::multipart_boundary();
     for image in images {
-        body.extend_from_slice(format!("--{BOUNDARY}\r\n").as_bytes());
+        body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
         body.extend_from_slice(format!("Content-Type: {}\r\n\r\n", image.media_type).as_bytes());
         body.extend_from_slice(&image.bytes);
         body.extend_from_slice(b"\r\n");
     }
-    body.extend_from_slice(format!("--{BOUNDARY}--\r\n").as_bytes());
+    body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
     Ok(media::multipart_related_response(
         Body::from(body),
-        BOUNDARY,
+        &boundary,
         match media_type {
             media::IMAGE_PNG => MediaType::ImagePng,
             _ => MediaType::ImageJpeg,

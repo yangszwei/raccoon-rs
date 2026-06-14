@@ -8,8 +8,6 @@ use tracing::Span;
 use crate::media::{self, MediaType};
 use crate::{BulkDataPath, DicomWebError, DicomWebState, DicomWebUrlBase};
 
-const WADO_METADATA_XML_BOUNDARY: &str = "wado-metadata-dicom-xml";
-
 pub(crate) async fn metadata_response(
     state: DicomWebState,
     headers: &HeaderMap,
@@ -57,10 +55,11 @@ pub(crate) async fn metadata_response(
                 )))
             }),
         media::DicomJsonOrXmlMultipart::XmlMultipart => {
-            let body = dicom_xml_multipart(&datasets).map_err(record_error)?;
+            let boundary = media::multipart_boundary();
+            let body = dicom_xml_multipart(&datasets, &boundary).map_err(record_error)?;
             Ok(media::multipart_related_response(
                 body,
-                WADO_METADATA_XML_BOUNDARY,
+                &boundary,
                 MediaType::ApplicationDicomXml,
                 None,
             ))
@@ -68,17 +67,17 @@ pub(crate) async fn metadata_response(
     }
 }
 
-fn dicom_xml_multipart(datasets: &[Value]) -> Result<String, DicomWebError> {
+fn dicom_xml_multipart(datasets: &[Value], boundary: &str) -> Result<String, DicomWebError> {
     let mut body = String::new();
     for dataset in datasets {
         body.push_str("--");
-        body.push_str(WADO_METADATA_XML_BOUNDARY);
+        body.push_str(boundary);
         body.push_str("\r\nContent-Type: application/dicom+xml\r\n\r\n");
         body.push_str(&crate::xml::native_dicom_model_xml(dataset)?);
         body.push_str("\r\n");
     }
     body.push_str("--");
-    body.push_str(WADO_METADATA_XML_BOUNDARY);
+    body.push_str(boundary);
     body.push_str("--\r\n");
     Ok(body)
 }

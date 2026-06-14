@@ -14,8 +14,6 @@ use crate::media::{
 };
 use crate::{DicomWebError, DicomWebUrlBase};
 
-const BOUNDARY: &str = "raccoon-dicomweb-boundary";
-
 #[derive(Debug)]
 pub(crate) struct CollectedInstance {
     pub(crate) identity: DicomInstanceIdentity,
@@ -148,9 +146,10 @@ fn multipart_response(
     uri: &Uri,
 ) -> Response {
     let base = DicomWebUrlBase::from_request(headers, uri);
+    let boundary = media::multipart_boundary();
     let mut body = Vec::new();
     for instance in instances {
-        body.extend_from_slice(format!("--{BOUNDARY}\r\n").as_bytes());
+        body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
         body.extend_from_slice(part_content_type(instance.transfer_syntax_uid.as_ref()).as_bytes());
         body.extend_from_slice(b"\r\n");
         body.extend_from_slice(content_location(&instance.identity, base.as_ref()).as_bytes());
@@ -158,10 +157,10 @@ fn multipart_response(
         body.extend_from_slice(&instance.body);
         body.extend_from_slice(b"\r\n");
     }
-    body.extend_from_slice(format!("--{BOUNDARY}--\r\n").as_bytes());
+    body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
     media::multipart_related_response(
         Body::from(body),
-        BOUNDARY,
+        &boundary,
         MediaType::ApplicationDicom,
         None,
     )

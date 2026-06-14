@@ -12,8 +12,6 @@ use crate::qido::params::{QidoQueryParams, uid_predicate};
 use crate::qido::response::{RetrieveUrlLevel, query_page_json};
 use crate::{DicomWebError, DicomWebRouteRegistry, DicomWebState, DicomWebUrlBase};
 
-const QIDO_XML_BOUNDARY: &str = "qido-dicom-xml";
-
 pub(crate) fn register(registry: &mut DicomWebRouteRegistry) {
     registry.route("/studies", get(search_studies));
     registry.route("/studies/{study}/series", get(search_study_series));
@@ -283,10 +281,11 @@ async fn query_route_inner(
             Ok(response)
         }
         DicomJsonOrXmlMultipart::XmlMultipart => {
-            let body = dicom_xml_multipart(&payload).map_err(record_error)?;
+            let boundary = media::multipart_boundary();
+            let body = dicom_xml_multipart(&payload, &boundary).map_err(record_error)?;
             Ok(media::multipart_related_response(
                 body,
-                QIDO_XML_BOUNDARY,
+                &boundary,
                 media::MediaType::ApplicationDicomXml,
                 None,
             ))
@@ -294,20 +293,23 @@ async fn query_route_inner(
     }
 }
 
-fn dicom_xml_multipart(payload: &serde_json::Value) -> Result<String, DicomWebError> {
+fn dicom_xml_multipart(
+    payload: &serde_json::Value,
+    boundary: &str,
+) -> Result<String, DicomWebError> {
     let datasets = payload
         .as_array()
         .ok_or_else(|| DicomWebError::Internal("QIDO XML payload is not an array".to_string()))?;
     let mut body = String::new();
     for dataset in datasets {
         body.push_str("--");
-        body.push_str(QIDO_XML_BOUNDARY);
+        body.push_str(boundary);
         body.push_str("\r\nContent-Type: application/dicom+xml\r\n\r\n");
         body.push_str(&crate::xml::native_dicom_model_xml(dataset)?);
         body.push_str("\r\n");
     }
     body.push_str("--");
-    body.push_str(QIDO_XML_BOUNDARY);
+    body.push_str(boundary);
     body.push_str("--\r\n");
     Ok(body)
 }
