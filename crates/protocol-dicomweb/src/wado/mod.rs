@@ -5,6 +5,7 @@ mod render;
 mod retrieve;
 mod routes;
 mod scope;
+mod transcoding;
 
 pub use provider::WadoRsProvider;
 pub use render::{
@@ -14,4 +15,8 @@ pub use render::{
 };
 pub(crate) use retrieve::{
     collect_instances, record_scope, retrieve_result, single_instance_response,
+};
+pub use transcoding::{
+    DicomTranscoder, NativeLittleEndianTranscoder, TranscodeError, TranscodedInstance,
+    TransferSyntaxPolicy,
 };

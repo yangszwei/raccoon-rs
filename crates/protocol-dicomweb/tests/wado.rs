@@ -32,6 +32,7 @@ use tracing_subscriber::layer::{Context, SubscriberExt};
 use tracing_subscriber::registry::LookupSpan;
 
 const NATIVE_TS: &str = "1.2.840.10008.1.2.1";
+const IMPLICIT_TS: &str = "1.2.840.10008.1.2";
 const OTHER_TS: &str = "1.2.840.10008.1.2.4.50";
 static TRACING_CAPTURE_LOCK: Mutex<()> = Mutex::new(());
 static TRACING_RECORDS: OnceLock<Arc<Mutex<Vec<String>>>> = OnceLock::new();
@@ -272,6 +273,107 @@ async fn wado_matching_requested_transfer_syntax_returns_native_object() {
 }
 
 #[tokio::test]
+async fn wado_single_instance_transcodes_explicit_to_implicit() {
+    let response = request(
+        router(Arc::new(FakeRetrieve {
+            instances: vec![dicom_instance_with_transfer_syntax(
+                "1.2.3.4.5",
+                &[1, 2, 3, 4],
+                NATIVE_TS,
+            )],
+            ..FakeRetrieve::default()
+        })),
+        "/studies/1.2.3/series/1.2.3.4/instances/1.2.3.4.5",
+        "application/dicom; transfer-syntax=\"1.2.840.10008.1.2\"",
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers()[header::CONTENT_TYPE],
+        "application/dicom; transfer-syntax=\"1.2.840.10008.1.2\""
+    );
+    let object =
+        dicom_object::from_reader(std::io::Cursor::new(response_bytes(response).await)).unwrap();
+    assert_eq!(
+        object.meta().transfer_syntax.trim_end_matches('\0'),
+        IMPLICIT_TS
+    );
+    assert_eq!(
+        object
+            .element(tags::SOP_INSTANCE_UID)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .as_ref(),
+        "1.2.3.4.5"
+    );
+    assert_eq!(
+        object
+            .element(tags::PIXEL_DATA)
+            .unwrap()
+            .to_bytes()
+            .unwrap()
+            .as_ref(),
+        &[1, 2, 3, 4]
+    );
+}
+
+#[tokio::test]
+async fn wado_single_instance_transcodes_implicit_to_explicit() {
+    let response = request(
+        router(Arc::new(FakeRetrieve {
+            instances: vec![dicom_instance_with_transfer_syntax(
+                "1.2.3.4.5",
+                &[1, 2, 3, 4],
+                IMPLICIT_TS,
+            )],
+            ..FakeRetrieve::default()
+        })),
+        "/studies/1.2.3/series/1.2.3.4/instances/1.2.3.4.5",
+        "application/dicom; transfer-syntax=\"1.2.840.10008.1.2.1\"",
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers()[header::CONTENT_TYPE],
+        "application/dicom; transfer-syntax=\"1.2.840.10008.1.2.1\""
+    );
+    let object =
+        dicom_object::from_reader(std::io::Cursor::new(response_bytes(response).await)).unwrap();
+    assert_eq!(
+        object.meta().transfer_syntax.trim_end_matches('\0'),
+        NATIVE_TS
+    );
+}
+
+#[tokio::test]
+async fn wado_multipart_retrieve_transcodes_every_part() {
+    let response = request(
+        router(Arc::new(FakeRetrieve {
+            instances: vec![
+                dicom_instance_with_transfer_syntax("1.2.3.4.5", &[1, 2, 3, 4], NATIVE_TS),
+                dicom_instance_with_transfer_syntax("1.2.3.4.6", &[5, 6, 7, 8], NATIVE_TS),
+            ],
+            ..FakeRetrieve::default()
+        })),
+        "/studies/1.2.3",
+        "multipart/related; type=\"application/dicom\"; transfer-syntax=\"1.2.840.10008.1.2\"",
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response_bytes(response).await;
+    let text = String::from_utf8_lossy(&body);
+    assert_eq!(
+        text.matches("Content-Type: application/dicom; transfer-syntax=\"1.2.840.10008.1.2\"")
+            .count(),
+        2
+    );
+}
+
+#[tokio::test]
 async fn wado_uri_rejects_missing_required_params() {
     let cases = [
         "/wado?studyUID=1.2.3&seriesUID=1.2.3.4&objectUID=1.2.3.4.5",
@@ -356,7 +458,7 @@ async fn wado_uri_rendered_request_is_not_acceptable_before_rendered_phase() {
 }
 
 #[tokio::test]
-async fn wado_uri_unsupported_transfer_syntax_without_transcoding_is_not_acceptable() {
+async fn wado_uri_unsupported_transfer_syntax_is_not_acceptable() {
     let response = request(
         router_uri(Arc::new(FakeRetrieve {
             instances: vec![fake_instance("1.2.3.4.5", "ONE")],
@@ -392,6 +494,35 @@ async fn wado_uri_matching_transfer_syntax_returns_native_object() {
         "application/dicom; transfer-syntax=\"1.2.840.10008.1.2.4.50\""
     );
     assert_eq!(response_text(response).await, "JPEG");
+}
+
+#[tokio::test]
+async fn wado_uri_dicom_object_transcodes_supported_transfer_syntax() {
+    let response = request(
+        router_uri(Arc::new(FakeRetrieve {
+            instances: vec![dicom_instance_with_transfer_syntax(
+                "1.2.3.4.5",
+                &[1, 2, 3, 4],
+                NATIVE_TS,
+            )],
+            ..FakeRetrieve::default()
+        })),
+        "/wado?requestType=WADO&studyUID=1.2.3&seriesUID=1.2.3.4&objectUID=1.2.3.4.5&transferSyntax=1.2.840.10008.1.2",
+        "*/*",
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers()[header::CONTENT_TYPE],
+        "application/dicom; transfer-syntax=\"1.2.840.10008.1.2\""
+    );
+    let object =
+        dicom_object::from_reader(std::io::Cursor::new(response_bytes(response).await)).unwrap();
+    assert_eq!(
+        object.meta().transfer_syntax.trim_end_matches('\0'),
+        IMPLICIT_TS
+    );
 }
 
 #[tokio::test]
@@ -677,6 +808,14 @@ fn wado_records_retrieve_span_fields() {
         "{records}"
     );
     assert!(
+        records.contains("dicomweb.stored_transfer_syntax_uid=1.2.840.10008.1.2.1"),
+        "{records}"
+    );
+    assert!(
+        records.contains("dicomweb.transcode.required=false"),
+        "{records}"
+    );
+    assert!(
         records.contains("dicomweb.retrieve.instance_count=1"),
         "{records}"
     );
@@ -690,6 +829,62 @@ fn wado_records_retrieve_span_fields() {
     );
     assert!(!records.contains("ONE"), "{records}");
     assert!(!records.contains("Doe^Jane"), "{records}");
+}
+
+#[test]
+fn wado_records_transcode_span_fields_without_body_bytes() {
+    let _guard = TRACING_CAPTURE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let records = tracing_records();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    tracing::callsite::rebuild_interest_cache();
+    let response = runtime.block_on(async {
+        request(
+            router(Arc::new(FakeRetrieve {
+                instances: vec![dicom_instance_with_transfer_syntax(
+                    "1.2.3.4.5",
+                    &[1, 2, 3, 4],
+                    NATIVE_TS,
+                )],
+                ..FakeRetrieve::default()
+            })),
+            "/studies/1.2.3/series/1.2.3.4/instances/1.2.3.4.5",
+            "application/dicom; transfer-syntax=\"1.2.840.10008.1.2\"",
+        )
+        .await
+    });
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let records = records.lock().unwrap().join("\n");
+    assert!(
+        records.contains("dicomweb.requested_transfer_syntax_uid=1.2.840.10008.1.2"),
+        "{records}"
+    );
+    assert!(
+        records.contains("dicomweb.stored_transfer_syntax_uid=1.2.840.10008.1.2.1"),
+        "{records}"
+    );
+    assert!(
+        records.contains("dicomweb.returned_transfer_syntax_uid=1.2.840.10008.1.2"),
+        "{records}"
+    );
+    assert!(
+        records.contains("dicomweb.transcode.required=true"),
+        "{records}"
+    );
+    assert!(
+        records.contains("dicomweb.transcode.backend=native"),
+        "{records}"
+    );
+    assert!(
+        records.contains("dicomweb.transcode.result=success"),
+        "{records}"
+    );
+    assert!(!records.contains("[1, 2, 3, 4]"), "{records}");
 }
 
 #[test]
@@ -1429,7 +1624,7 @@ fn wado_records_bulk_frame_and_part_span_fields() {
 }
 
 #[tokio::test]
-async fn wado_capabilities_advertise_native_dicom_retrieve_only() {
+async fn wado_capabilities_advertise_native_dicom_retrieve_with_little_endian_transcoding() {
     let payload = response_json(
         router(Arc::new(FakeRetrieve::default()))
             .oneshot(
@@ -1457,6 +1652,8 @@ async fn wado_capabilities_advertise_native_dicom_retrieve_only() {
     assert!(!text.contains("application/dicom+json"));
     assert!(!text.contains("rendered"));
     assert!(!text.contains("thumbnail"));
+    assert!(text.contains("1.2.840.10008.1.2"));
+    assert!(text.contains("1.2.840.10008.1.2.1"));
 }
 
 #[tokio::test]
@@ -1644,6 +1841,23 @@ fn dicom_instance(
     }
 }
 
+fn dicom_instance_with_transfer_syntax(
+    sop_instance_uid: &'static str,
+    pixel_data: &[u8],
+    transfer_syntax_uid: &'static str,
+) -> FakeInstance {
+    FakeInstance {
+        sop_instance_uid,
+        transfer_syntax_uid,
+        body: dicom_bytes_with_transfer_syntax(
+            sop_instance_uid,
+            pixel_data,
+            None,
+            transfer_syntax_uid,
+        ),
+    }
+}
+
 fn identity(sop_instance_uid: &str) -> DicomInstanceIdentity {
     identity_for("1.2.3.4", sop_instance_uid)
 }
@@ -1723,6 +1937,20 @@ fn metadata_row_with_value_bulk_data_marker() -> InstanceMetadata {
 }
 
 fn dicom_bytes(sop_instance_uid: &str, pixel_data: &[u8], waveform_data: Option<&[u8]>) -> Vec<u8> {
+    dicom_bytes_with_transfer_syntax(
+        sop_instance_uid,
+        pixel_data,
+        waveform_data,
+        uids::EXPLICIT_VR_LITTLE_ENDIAN,
+    )
+}
+
+fn dicom_bytes_with_transfer_syntax(
+    sop_instance_uid: &str,
+    pixel_data: &[u8],
+    waveform_data: Option<&[u8]>,
+    transfer_syntax_uid: &str,
+) -> Vec<u8> {
     let mut object = InMemDicomObject::from_element_iter([
         DataElement::new(tags::STUDY_INSTANCE_UID, VR::UI, "1.2.3"),
         DataElement::new(tags::SERIES_INSTANCE_UID, VR::UI, "1.2.3.4"),
@@ -1760,7 +1988,7 @@ fn dicom_bytes(sop_instance_uid: &str, pixel_data: &[u8], waveform_data: Option<
         ));
     }
     let object = object
-        .with_meta(FileMetaTableBuilder::new().transfer_syntax(uids::EXPLICIT_VR_LITTLE_ENDIAN))
+        .with_meta(FileMetaTableBuilder::new().transfer_syntax(transfer_syntax_uid))
         .unwrap();
     let mut bytes = Vec::new();
     object.write_all(&mut bytes).unwrap();

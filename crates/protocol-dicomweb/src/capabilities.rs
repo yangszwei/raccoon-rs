@@ -282,12 +282,15 @@ impl DicomWebFeatureSet {
         }
     }
 
-    pub fn enable_transcoding(&mut self) {
+    pub fn set_wado_rs_transfer_syntaxes(&mut self, transfer_syntaxes: Vec<&'static str>) {
         if let Some(wado_rs) = &mut self.wado_rs {
-            wado_rs.transfer_syntaxes.push("1.2.840.10008.1.2.1");
+            wado_rs.transfer_syntaxes = transfer_syntaxes;
         }
+    }
+
+    pub fn set_wado_uri_transfer_syntaxes(&mut self, transfer_syntaxes: Vec<&'static str>) {
         if let Some(wado_uri) = &mut self.wado_uri {
-            wado_uri.transfer_syntaxes.push("1.2.840.10008.1.2.1");
+            wado_uri.transfer_syntaxes = transfer_syntaxes;
         }
     }
 

@@ -36,8 +36,9 @@ pub use uid::{
 };
 pub use url::{BulkDataPath, BulkDataUri, DicomWebUrlBase, RetrieveUrl};
 pub use wado::{
-    FilesystemRenderCache, RenderCache, RenderCacheConfig, RenderError, RenderParams,
-    RenderRequest, RenderResponse, RenderService, RenderedImage, RenderedWadoRsProvider,
-    RendererBackend, RetrieveRenderService, WadoRenderOptions, WadoRsProvider,
+    DicomTranscoder, FilesystemRenderCache, NativeLittleEndianTranscoder, RenderCache,
+    RenderCacheConfig, RenderError, RenderParams, RenderRequest, RenderResponse, RenderService,
+    RenderedImage, RenderedWadoRsProvider, RendererBackend, RetrieveRenderService, TranscodeError,
+    TranscodedInstance, TransferSyntaxPolicy, WadoRenderOptions, WadoRsProvider,
 };
 pub use wado_uri::WadoUriProvider;

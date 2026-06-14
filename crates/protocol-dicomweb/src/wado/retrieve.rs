@@ -1,11 +1,7 @@
-use std::collections::VecDeque;
-use std::pin::Pin;
-use std::task::{Context, Poll};
-
 use axum::body::Body;
 use axum::http::{HeaderMap, HeaderValue, Uri, header};
 use axum::response::{IntoResponse, Response};
-use futures_util::{Stream, StreamExt};
+use futures_util::StreamExt;
 use raccoon_contract_dicom::{DicomInstanceIdentity, TransferSyntaxUid};
 use raccoon_contract_object_store::Bytes;
 use raccoon_service_retrieve::{
@@ -18,6 +14,7 @@ use crate::instrumentation::record_error;
 use crate::media::{
     self, AvailableRepresentation, MediaType, MediaTypeParams, SelectedRepresentation,
 };
+use crate::wado::{TranscodeError, TransferSyntaxPolicy};
 use crate::{DicomWebError, DicomWebUrlBase};
 
 #[derive(Debug)]
@@ -51,15 +48,22 @@ pub(crate) async fn retrieve_response(
     Span::current().record("dicomweb.retrieve.instance_count", result.instance_count);
 
     match selected.media_type {
-        MediaType::MultipartRelated => {
-            Ok(
-                multipart_response(result, headers, uri, requested_transfer_syntax)
-                    .await
-                    .map_err(record_error)?,
-            )
-        }
+        MediaType::MultipartRelated => Ok(multipart_response(
+            result,
+            headers,
+            uri,
+            requested_transfer_syntax,
+            state.wado_rs_transfer_syntax_policy.as_ref(),
+        )
+        .await
+        .map_err(record_error)?),
         MediaType::ApplicationDicom => {
-            single_instance_response(result, requested_transfer_syntax).await
+            single_instance_response(
+                result,
+                requested_transfer_syntax,
+                state.wado_rs_transfer_syntax_policy.as_ref(),
+            )
+            .await
         }
         _ => unreachable!("WADO object negotiation only offers DICOM representations"),
     }
@@ -144,30 +148,14 @@ async fn multipart_response(
     headers: &HeaderMap,
     uri: &Uri,
     requested_transfer_syntax: Option<TransferSyntaxUid>,
+    policy: Option<&TransferSyntaxPolicy>,
 ) -> Result<Response, DicomWebError> {
     let base = DicomWebUrlBase::from_request(headers, uri);
-    let mut instances = result.stream;
-    let first_instance = instances
-        .next()
-        .await
-        .ok_or_else(|| DicomWebError::NotFound("no matching DICOM instances".to_string()))?
-        .map_err(map_stream_error)?;
-    validate_instance_transfer_syntax(&first_instance, requested_transfer_syntax.as_ref())?;
-    if let Some(transfer_syntax) = requested_transfer_syntax.as_ref() {
-        Span::current().record(
-            "dicomweb.returned_transfer_syntax_uid",
-            transfer_syntax.as_str(),
-        );
-    }
+    let instances = prepare_instances(result, requested_transfer_syntax.as_ref(), policy).await?;
     let boundary = media::multipart_boundary();
+    let body = multipart_body(instances, base, &boundary).await?;
     Ok(media::multipart_related_response(
-        Body::from_stream(MultipartRetrieveBody::new(
-            first_instance,
-            instances,
-            base,
-            requested_transfer_syntax,
-            boundary.clone(),
-        )),
+        Body::from(body),
         &boundary,
         MediaType::ApplicationDicom,
         None,
@@ -177,20 +165,18 @@ async fn multipart_response(
 pub(crate) async fn single_instance_response(
     result: RetrieveResult,
     requested_transfer_syntax: Option<TransferSyntaxUid>,
+    policy: Option<&TransferSyntaxPolicy>,
 ) -> Result<Response, DicomWebError> {
     if result.instance_count != 1 {
         return Err(DicomWebError::not_acceptable(
             "application/dicom response is only available for single instance retrieve",
         ));
     }
-    let mut stream = result.stream;
-    let instance = stream
-        .next()
-        .await
-        .ok_or_else(|| DicomWebError::NotFound("no matching DICOM instances".to_string()))?
-        .map_err(map_stream_error)?;
-    validate_instance_transfer_syntax(&instance, requested_transfer_syntax.as_ref())?;
-    record_native_transfer_syntax_for_instance(&instance);
+    let mut instances =
+        prepare_instances(result, requested_transfer_syntax.as_ref(), policy).await?;
+    let instance = instances
+        .pop()
+        .ok_or_else(|| DicomWebError::NotFound("no matching DICOM instances".to_string()))?;
     let content_type = media::content_type(
         MediaType::ApplicationDicom,
         &media::MediaTypeParams {
@@ -211,122 +197,120 @@ pub(crate) async fn single_instance_response(
         .into_response())
 }
 
-type DicomWebBodyStream = Pin<Box<dyn Stream<Item = Result<Bytes, DicomWebError>> + Send>>;
+async fn prepare_instances(
+    result: RetrieveResult,
+    requested_transfer_syntax: Option<&TransferSyntaxUid>,
+    policy: Option<&TransferSyntaxPolicy>,
+) -> Result<Vec<RetrievedInstance>, DicomWebError> {
+    let mut stream = result.stream;
+    let mut instances = Vec::with_capacity(result.instance_count);
+    while let Some(item) = stream.next().await {
+        let instance = item.map_err(map_stream_error)?;
+        instances.push(prepare_instance(instance, requested_transfer_syntax, policy).await?);
+    }
+    if instances.is_empty() {
+        return Err(DicomWebError::NotFound(
+            "no matching DICOM instances".to_string(),
+        ));
+    }
+    Ok(instances)
+}
 
-struct MultipartRetrieveBody {
-    first_instance: Option<RetrievedInstance>,
-    instances: raccoon_service_retrieve::RetrieveStream,
-    current_body: Option<DicomWebBodyStream>,
-    pending: VecDeque<Bytes>,
+async fn prepare_instance(
+    instance: RetrievedInstance,
+    requested: Option<&TransferSyntaxUid>,
+    policy: Option<&TransferSyntaxPolicy>,
+) -> Result<RetrievedInstance, DicomWebError> {
+    record_stored_transfer_syntax_for_instance(&instance);
+    let Some(requested) = requested else {
+        Span::current().record("dicomweb.transcode.required", false);
+        record_native_transfer_syntax_for_instance(&instance);
+        return Ok(instance);
+    };
+    if instance
+        .transfer_syntax_uid
+        .as_ref()
+        .is_some_and(|stored| stored == requested)
+    {
+        Span::current().record("dicomweb.transcode.required", false);
+        record_native_transfer_syntax_for_instance(&instance);
+        return Ok(instance);
+    }
+
+    Span::current().record("dicomweb.transcode.required", true);
+    let Some(policy) = policy else {
+        Span::current().record("dicomweb.transcode.result", "unsupported");
+        return Err(DicomWebError::not_acceptable(format!(
+            "transfer syntax {requested} requires transcoding, which is not supported"
+        )));
+    };
+    let Some(transcoder) = policy.transcoder() else {
+        Span::current().record("dicomweb.transcode.result", "unsupported");
+        return Err(DicomWebError::not_acceptable(format!(
+            "transfer syntax {requested} requires transcoding, which is not supported"
+        )));
+    };
+    if !policy.allows_target(requested) {
+        Span::current().record("dicomweb.transcode.backend", transcoder.backend());
+        Span::current().record("dicomweb.transcode.result", "unsupported");
+        return Err(DicomWebError::not_acceptable(format!(
+            "transfer syntax {requested} requires transcoding, which is not supported"
+        )));
+    }
+    if !transcoder.supports(instance.transfer_syntax_uid.as_ref(), requested) {
+        Span::current().record("dicomweb.transcode.backend", transcoder.backend());
+        Span::current().record("dicomweb.transcode.result", "unsupported");
+        return Err(DicomWebError::not_acceptable(format!(
+            "transfer syntax {requested} requires transcoding, which is not supported"
+        )));
+    }
+
+    Span::current().record("dicomweb.transcode.backend", transcoder.backend());
+    match transcoder.transcode(instance, requested).await {
+        Ok(transcoded) => {
+            Span::current().record("dicomweb.transcode.result", "success");
+            record_native_transfer_syntax_for_instance(&transcoded.instance);
+            Ok(transcoded.instance)
+        }
+        Err(TranscodeError::Unsupported { .. }) => {
+            Span::current().record("dicomweb.transcode.result", "unsupported");
+            Err(DicomWebError::not_acceptable(format!(
+                "transfer syntax {requested} requires transcoding, which is not supported"
+            )))
+        }
+        Err(error) => {
+            Span::current().record("dicomweb.transcode.result", "failed");
+            Err(DicomWebError::Internal(format!(
+                "transcode failed: {error}"
+            )))
+        }
+    }
+}
+
+async fn multipart_body(
+    instances: Vec<RetrievedInstance>,
     base: Option<DicomWebUrlBase>,
-    requested_transfer_syntax: Option<TransferSyntaxUid>,
-    boundary: String,
-    finished: bool,
-}
-
-impl MultipartRetrieveBody {
-    fn new(
-        first_instance: RetrievedInstance,
-        instances: raccoon_service_retrieve::RetrieveStream,
-        base: Option<DicomWebUrlBase>,
-        requested_transfer_syntax: Option<TransferSyntaxUid>,
-        boundary: String,
-    ) -> Self {
-        Self {
-            first_instance: Some(first_instance),
-            instances,
-            current_body: None,
-            pending: VecDeque::new(),
-            base,
-            requested_transfer_syntax,
-            boundary,
-            finished: false,
+    boundary: &str,
+) -> Result<Bytes, DicomWebError> {
+    let mut bytes = Vec::new();
+    for instance in instances {
+        bytes.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+        bytes
+            .extend_from_slice(part_content_type(instance.transfer_syntax_uid.as_ref()).as_bytes());
+        bytes.extend_from_slice(b"\r\n");
+        bytes.extend_from_slice(content_location(&instance.identity, base.as_ref()).as_bytes());
+        bytes.extend_from_slice(b"\r\n\r\n");
+        let mut body = instance.body.into_stream();
+        while let Some(chunk) = body.next().await {
+            let chunk = chunk.map_err(|error| {
+                DicomWebError::Internal(format!("object stream failed: {error}"))
+            })?;
+            bytes.extend_from_slice(&chunk);
         }
+        bytes.extend_from_slice(b"\r\n");
     }
-
-    fn queue_instance_headers(&mut self, instance: &RetrievedInstance) {
-        self.pending
-            .push_back(Bytes::from(format!("--{}\r\n", self.boundary)));
-        self.pending.push_back(Bytes::from(part_content_type(
-            instance.transfer_syntax_uid.as_ref(),
-        )));
-        self.pending.push_back(Bytes::from_static(b"\r\n"));
-        self.pending.push_back(Bytes::from(content_location(
-            &instance.identity,
-            self.base.as_ref(),
-        )));
-        self.pending.push_back(Bytes::from_static(b"\r\n\r\n"));
-    }
-}
-
-impl Stream for MultipartRetrieveBody {
-    type Item = Result<Bytes, DicomWebError>;
-
-    fn poll_next(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let this = self.get_mut();
-        loop {
-            if let Some(bytes) = this.pending.pop_front() {
-                return Poll::Ready(Some(Ok(bytes)));
-            }
-
-            if let Some(body) = this.current_body.as_mut() {
-                match body.as_mut().poll_next(context) {
-                    Poll::Ready(Some(Ok(bytes))) => return Poll::Ready(Some(Ok(bytes))),
-                    Poll::Ready(Some(Err(error))) => return Poll::Ready(Some(Err(error))),
-                    Poll::Ready(None) => {
-                        this.current_body = None;
-                        this.pending.push_back(Bytes::from_static(b"\r\n"));
-                        continue;
-                    }
-                    Poll::Pending => return Poll::Pending,
-                }
-            }
-
-            if this.finished {
-                return Poll::Ready(None);
-            }
-
-            let next_instance = if let Some(instance) = this.first_instance.take() {
-                Poll::Ready(Some(Ok(instance)))
-            } else {
-                this.instances.as_mut().poll_next(context)
-            };
-
-            match next_instance {
-                Poll::Ready(Some(Ok(instance))) => {
-                    if let Err(error) = validate_instance_transfer_syntax(
-                        &instance,
-                        this.requested_transfer_syntax.as_ref(),
-                    ) {
-                        return Poll::Ready(Some(Err(error)));
-                    }
-                    if let Some(transfer_syntax) = this.requested_transfer_syntax.as_ref() {
-                        Span::current().record(
-                            "dicomweb.returned_transfer_syntax_uid",
-                            transfer_syntax.as_str(),
-                        );
-                    }
-                    this.queue_instance_headers(&instance);
-                    this.current_body = Some(Box::pin(instance.body.into_stream().map(|chunk| {
-                        chunk.map_err(|error| {
-                            DicomWebError::Internal(format!("object stream failed: {error}"))
-                        })
-                    })));
-                    continue;
-                }
-                Poll::Ready(Some(Err(error))) => {
-                    return Poll::Ready(Some(Err(map_stream_error(error))));
-                }
-                Poll::Ready(None) => {
-                    this.finished = true;
-                    this.pending
-                        .push_back(Bytes::from(format!("--{}--\r\n", this.boundary)));
-                    continue;
-                }
-                Poll::Pending => return Poll::Pending,
-            }
-        }
-    }
+    bytes.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+    Ok(Bytes::from(bytes))
 }
 
 fn part_content_type(transfer_syntax_uid: Option<&TransferSyntaxUid>) -> String {
@@ -384,23 +368,13 @@ fn record_native_transfer_syntax_for_instance(instance: &RetrievedInstance) {
     }
 }
 
-fn validate_instance_transfer_syntax(
-    instance: &RetrievedInstance,
-    requested: Option<&TransferSyntaxUid>,
-) -> Result<(), DicomWebError> {
-    let Some(requested) = requested else {
-        return Ok(());
-    };
-    if instance
-        .transfer_syntax_uid
-        .as_ref()
-        .is_some_and(|stored| stored == requested)
-    {
-        return Ok(());
+fn record_stored_transfer_syntax_for_instance(instance: &RetrievedInstance) {
+    if let Some(transfer_syntax_uid) = instance.transfer_syntax_uid.as_ref() {
+        Span::current().record(
+            "dicomweb.stored_transfer_syntax_uid",
+            transfer_syntax_uid.as_str(),
+        );
     }
-    Err(DicomWebError::not_acceptable(format!(
-        "transfer syntax {requested} requires transcoding, which is not supported"
-    )))
 }
 
 pub(crate) fn record_scope(scope: &RetrieveScope) {

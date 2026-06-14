@@ -10,7 +10,7 @@ use tracing::Instrument;
 
 use crate::instrumentation::record_error;
 use crate::media::{self, MediaType, MediaTypeParams};
-use crate::wado::{record_scope, retrieve_result, single_instance_response};
+use crate::wado::{TransferSyntaxPolicy, record_scope, retrieve_result, single_instance_response};
 use crate::{
     DicomWebError, DicomWebProvider, DicomWebRouteRegistry, DicomWebState, RouteTelemetry,
     series_instance_uid, sop_instance_uid, study_instance_uid, transfer_syntax_uid,
@@ -19,18 +19,32 @@ use crate::{
 /// WADO-URI provider for query-parameter based DICOM object retrieval.
 pub struct WadoUriProvider {
     retrieve: Arc<dyn RetrieveService>,
+    transfer_syntax_policy: TransferSyntaxPolicy,
 }
 
 impl WadoUriProvider {
     pub fn new(retrieve: Arc<dyn RetrieveService>) -> Self {
-        Self { retrieve }
+        Self {
+            retrieve,
+            transfer_syntax_policy: TransferSyntaxPolicy::native_little_endian(),
+        }
+    }
+
+    pub fn with_transfer_syntax_policy(mut self, policy: TransferSyntaxPolicy) -> Self {
+        self.transfer_syntax_policy = policy;
+        self
     }
 }
 
 impl DicomWebProvider for WadoUriProvider {
     fn register(&self, registry: &mut DicomWebRouteRegistry) {
         registry.feature_set_mut().enable_wado_uri();
+        registry.feature_set_mut().set_wado_uri_transfer_syntaxes(
+            self.transfer_syntax_policy.advertised_transfer_syntaxes(),
+        );
         registry.state_mut().retrieve = Some(self.retrieve.clone());
+        registry.state_mut().wado_uri_transfer_syntax_policy =
+            Some(self.transfer_syntax_policy.clone());
         registry.route(
             "/wado",
             get(wado_uri),
@@ -123,9 +137,13 @@ async fn object_response(
             .as_ref()
             .map(TransferSyntaxUid::as_str),
     );
-    single_instance_response(result, requested_transfer_syntax)
-        .await
-        .map_err(record_error)
+    single_instance_response(
+        result,
+        requested_transfer_syntax,
+        state.wado_uri_transfer_syntax_policy.as_ref(),
+    )
+    .await
+    .map_err(record_error)
 }
 
 fn parse_query(query: Option<&str>) -> Result<WadoUriQuery, DicomWebError> {
@@ -219,9 +237,13 @@ fn wado_uri_span(uri: &Uri) -> tracing::Span {
         dicom.sop_instance_uid = tracing::field::Empty,
         dicomweb.requested_content_type = tracing::field::Empty,
         dicomweb.requested_transfer_syntax_uid = tracing::field::Empty,
+        dicomweb.stored_transfer_syntax_uid = tracing::field::Empty,
         dicomweb.requested_charset = tracing::field::Empty,
         dicomweb.selected_media_type = tracing::field::Empty,
         dicomweb.returned_transfer_syntax_uid = tracing::field::Empty,
+        dicomweb.transcode.required = tracing::field::Empty,
+        dicomweb.transcode.backend = tracing::field::Empty,
+        dicomweb.transcode.result = tracing::field::Empty,
         dicomweb.retrieve.instance_count = tracing::field::Empty,
         http.response.status_code = tracing::field::Empty,
         error.type = tracing::field::Empty,
