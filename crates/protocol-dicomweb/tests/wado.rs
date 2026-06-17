@@ -14,7 +14,10 @@ use raccoon_contract_dicom::{
     TransferSyntaxUid,
 };
 use raccoon_contract_object_store::ByteStream;
-use raccoon_protocol_dicomweb::{DicomWebRouter, WadoRsProvider, WadoUriProvider};
+use raccoon_protocol_dicomweb::{
+    DicomWebRouter, RenderCacheConfig, RenderedWadoRsProvider, WadoRenderOptions, WadoRsProvider,
+    WadoUriProvider,
+};
 use raccoon_service_retrieve::{
     InstanceMetadata, MetadataRepository, RetrieveError, RetrieveRepositoryError, RetrieveRequest,
     RetrieveResult, RetrieveScope, RetrieveService, RetrievedInstance,
@@ -391,6 +394,156 @@ async fn wado_uri_matching_transfer_syntax_returns_native_object() {
     assert_eq!(response_text(response).await, "JPEG");
 }
 
+#[tokio::test]
+async fn wado_instance_rendered_returns_jpeg() {
+    let response = request(
+        router_with_render(Arc::new(FakeRetrieve {
+            instances: vec![fake_dicom_instance("1.2.3.4.5", &[0, 64, 128, 255])],
+            ..FakeRetrieve::default()
+        })),
+        "/studies/1.2.3/series/1.2.3.4/instances/1.2.3.4.5/rendered",
+        "image/jpeg",
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[header::CONTENT_TYPE], "image/jpeg");
+    let body = response_bytes(response).await;
+    assert!(body.starts_with(&[0xff, 0xd8, 0xff]), "{body:?}");
+}
+
+#[tokio::test]
+async fn wado_instance_rendered_returns_png() {
+    let response = request(
+        router_with_render(Arc::new(FakeRetrieve {
+            instances: vec![fake_dicom_instance("1.2.3.4.5", &[0, 64, 128, 255])],
+            ..FakeRetrieve::default()
+        })),
+        "/studies/1.2.3/series/1.2.3.4/instances/1.2.3.4.5/rendered",
+        "image/png",
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[header::CONTENT_TYPE], "image/png");
+    let body = response_bytes(response).await;
+    assert!(body.starts_with(b"\x89PNG\r\n\x1a\n"), "{body:?}");
+}
+
+#[tokio::test]
+async fn wado_study_rendered_returns_multipart_images() {
+    let response = request(
+        router_with_render(Arc::new(FakeRetrieve {
+            instances: vec![
+                fake_dicom_instance("1.2.3.4.5", &[0, 64, 128, 255]),
+                fake_dicom_instance("1.2.3.4.6", &[255, 128, 64, 0]),
+            ],
+            ..FakeRetrieve::default()
+        })),
+        "/studies/1.2.3/rendered",
+        "multipart/related; type=\"image/jpeg\"",
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let content_type = response.headers()[header::CONTENT_TYPE].to_str().unwrap();
+    assert!(content_type.contains("multipart/related"), "{content_type}");
+    assert!(
+        content_type.contains("type=\"image/jpeg\""),
+        "{content_type}"
+    );
+    let body = response_bytes(response).await;
+    let text = String::from_utf8_lossy(&body);
+    assert_eq!(text.matches("Content-Type: image/jpeg").count(), 2);
+}
+
+#[tokio::test]
+async fn wado_thumbnail_endpoints_return_single_image() {
+    for path in [
+        "/studies/1.2.3/thumbnail",
+        "/studies/1.2.3/series/1.2.3.4/thumbnail",
+        "/studies/1.2.3/series/1.2.3.4/instances/1.2.3.4.5/thumbnail",
+        "/studies/1.2.3/series/1.2.3.4/instances/1.2.3.4.5/frames/1/thumbnail",
+    ] {
+        let response = request(
+            router_with_render(Arc::new(FakeRetrieve {
+                instances: vec![fake_dicom_instance("1.2.3.4.5", &[0, 64, 128, 255])],
+                ..FakeRetrieve::default()
+            })),
+            path,
+            "image/png",
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK, "{path}");
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "image/png");
+    }
+}
+
+#[tokio::test]
+async fn wado_frames_rendered_returns_one_image_per_frame() {
+    let response = request(
+        router_with_render(Arc::new(FakeRetrieve {
+            instances: vec![fake_dicom_instance(
+                "1.2.3.4.5",
+                &[0, 64, 128, 255, 255, 128, 64, 0],
+            )],
+            ..FakeRetrieve::default()
+        })),
+        "/studies/1.2.3/series/1.2.3.4/instances/1.2.3.4.5/frames/1,2/rendered",
+        "multipart/related; type=\"image/png\"",
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let content_type = response.headers()[header::CONTENT_TYPE].to_str().unwrap();
+    assert!(
+        content_type.contains("type=\"image/png\""),
+        "{content_type}"
+    );
+    let body = response_bytes(response).await;
+    let text = String::from_utf8_lossy(&body);
+    assert_eq!(text.matches("Content-Type: image/png").count(), 2);
+}
+
+#[tokio::test]
+async fn wado_rendered_accepts_viewport_window_and_quality() {
+    let response = request(
+        router_with_render(Arc::new(FakeRetrieve {
+            instances: vec![fake_dicom_instance("1.2.3.4.5", &[0, 64, 128, 255])],
+            ..FakeRetrieve::default()
+        })),
+        "/studies/1.2.3/series/1.2.3.4/instances/1.2.3.4.5/rendered?viewport=1,1&window=128,256&quality=70",
+        "image/jpeg",
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[header::CONTENT_TYPE], "image/jpeg");
+}
+
+#[tokio::test]
+async fn wado_rendered_rejects_unsupported_params() {
+    for uri in [
+        "/studies/1.2.3/series/1.2.3.4/instances/1.2.3.4.5/rendered?iccprofile=yes",
+        "/studies/1.2.3/series/1.2.3.4/instances/1.2.3.4.5/rendered?annotation=patient",
+        "/studies/1.2.3/series/1.2.3.4/instances/1.2.3.4.5/rendered?presentationUID=1.2.3",
+        "/studies/1.2.3/series/1.2.3.4/instances/1.2.3.4.5/rendered?region=0,0,1,1",
+    ] {
+        let response = request(
+            router_with_render(Arc::new(FakeRetrieve {
+                instances: vec![fake_dicom_instance("1.2.3.4.5", &[0, 64, 128, 255])],
+                ..FakeRetrieve::default()
+            })),
+            uri,
+            "image/jpeg",
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::NOT_ACCEPTABLE, "{uri}");
+    }
+}
+
 #[test]
 fn wado_uri_records_route_and_validated_uid_span_fields() {
     let _guard = TRACING_CAPTURE_LOCK
@@ -537,6 +690,119 @@ fn wado_records_retrieve_span_fields() {
     );
     assert!(!records.contains("ONE"), "{records}");
     assert!(!records.contains("Doe^Jane"), "{records}");
+}
+
+#[test]
+fn wado_rendered_records_backend_and_cache_span_fields_without_body_bytes() {
+    let _guard = TRACING_CAPTURE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let records = tracing_records();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    tracing::callsite::rebuild_interest_cache();
+    let response = runtime.block_on(async {
+        request(
+            router_with_render(Arc::new(FakeRetrieve {
+                instances: vec![fake_dicom_instance("1.2.3.4.5", &[0, 64, 128, 255])],
+                ..FakeRetrieve::default()
+            })),
+            "/studies/1.2.3/series/1.2.3.4/instances/1.2.3.4.5/rendered?quality=80",
+            "image/jpeg",
+        )
+        .await
+    });
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let records = records.lock().unwrap().join("\n");
+    assert!(records.contains("dicomweb.service=WADO-RS"), "{records}");
+    assert!(records.contains("dicomweb.resource=rendered"), "{records}");
+    assert!(
+        records
+            .contains("http.route=/studies/{study}/series/{series}/instances/{instance}/rendered"),
+        "{records}"
+    );
+    assert!(
+        records.contains("dicom.study_instance_uid=1.2.3"),
+        "{records}"
+    );
+    assert!(
+        records.contains("dicom.series_instance_uid=1.2.3.4"),
+        "{records}"
+    );
+    assert!(
+        records.contains("dicom.sop_instance_uid=1.2.3.4.5"),
+        "{records}"
+    );
+    assert!(
+        records.contains("dicomweb.selected_media_type=image/jpeg"),
+        "{records}"
+    );
+    assert!(
+        records.contains("dicomweb.renderer_backend=native"),
+        "{records}"
+    );
+    assert!(
+        records.contains("dicomweb.render_cache_result=bypass"),
+        "{records}"
+    );
+    assert!(!records.contains("255, 216"), "{records}");
+}
+
+#[test]
+fn wado_rendered_records_cache_miss_store_and_hit() {
+    let _guard = TRACING_CAPTURE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let records = tracing_records();
+    let cache_dir = tempfile::tempdir().unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    tracing::callsite::rebuild_interest_cache();
+    let retrieve = Arc::new(FakeRetrieve {
+        instances: vec![fake_dicom_instance("1.2.3.4.5", &[0, 64, 128, 255])],
+        ..FakeRetrieve::default()
+    });
+    runtime.block_on(async {
+        let router = router_with_render_options(
+            retrieve,
+            WadoRenderOptions {
+                cache: Some(RenderCacheConfig {
+                    directory: cache_dir.path().to_path_buf(),
+                    ttl: None,
+                    max_bytes: None,
+                }),
+                ..WadoRenderOptions::default()
+            },
+        );
+        for _ in 0..2 {
+            let response = request(
+                router.clone(),
+                "/studies/1.2.3/series/1.2.3.4/instances/1.2.3.4.5/rendered",
+                "image/png",
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+    });
+
+    let records = records.lock().unwrap().join("\n");
+    assert!(
+        records.contains("dicomweb.render_cache_result=miss"),
+        "{records}"
+    );
+    assert!(
+        records.contains("dicomweb.render_cache_result=store"),
+        "{records}"
+    );
+    assert!(
+        records.contains("dicomweb.render_cache_result=hit"),
+        "{records}"
+    );
 }
 
 #[tokio::test]
@@ -1194,6 +1460,37 @@ async fn wado_capabilities_advertise_native_dicom_retrieve_only() {
 }
 
 #[tokio::test]
+async fn wado_capabilities_advertise_rendered_when_registered() {
+    let payload = response_json(
+        router_with_render(Arc::new(FakeRetrieve::default()))
+            .oneshot(
+                Request::builder()
+                    .method("OPTIONS")
+                    .uri("/")
+                    .header(header::HOST, "pacs.example.test")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap(),
+    )
+    .await;
+    let text = payload.to_string();
+
+    assert!(text.contains("RetrieveStudyRendered"));
+    assert!(text.contains("RetrieveSeriesRendered"));
+    assert!(text.contains("RetrieveInstanceRendered"));
+    assert!(text.contains("RetrieveRenderedFrames"));
+    assert!(text.contains("RetrieveStudyThumbnail"));
+    assert!(text.contains("RetrieveFrameThumbnail"));
+    assert!(text.contains("image/jpeg"));
+    assert!(text.contains("image/png"));
+    assert!(text.contains("viewport"));
+    assert!(text.contains("window"));
+    assert!(text.contains("quality"));
+}
+
+#[tokio::test]
 async fn wado_uri_capabilities_are_advertised_only_when_registered() {
     let wado_rs_payload = response_json(
         router(Arc::new(FakeRetrieve::default()))
@@ -1277,6 +1574,20 @@ fn router_uri(retrieve: Arc<FakeRetrieve>) -> Router {
 fn router_with_metadata(retrieve: Arc<FakeRetrieve>, metadata: Arc<FakeMetadata>) -> Router {
     DicomWebRouter::new()
         .register(WadoRsProvider::new(retrieve).with_metadata_repository(metadata))
+        .into_router()
+}
+
+fn router_with_render(retrieve: Arc<FakeRetrieve>) -> Router {
+    DicomWebRouter::new()
+        .register(WadoRsProvider::new(retrieve.clone()))
+        .register(RenderedWadoRsProvider::new(retrieve))
+        .into_router()
+}
+
+fn router_with_render_options(retrieve: Arc<FakeRetrieve>, options: WadoRenderOptions) -> Router {
+    DicomWebRouter::new()
+        .register(WadoRsProvider::new(retrieve.clone()))
+        .register(RenderedWadoRsProvider::with_options(retrieve, options))
         .into_router()
 }
 
@@ -1420,7 +1731,15 @@ fn dicom_bytes(sop_instance_uid: &str, pixel_data: &[u8], waveform_data: Option<
         DataElement::new(tags::ROWS, VR::US, PrimitiveValue::from(2_u16)),
         DataElement::new(tags::COLUMNS, VR::US, PrimitiveValue::from(2_u16)),
         DataElement::new(tags::SAMPLES_PER_PIXEL, VR::US, PrimitiveValue::from(1_u16)),
+        DataElement::new(tags::PHOTOMETRIC_INTERPRETATION, VR::CS, "MONOCHROME2"),
         DataElement::new(tags::BITS_ALLOCATED, VR::US, PrimitiveValue::from(8_u16)),
+        DataElement::new(tags::BITS_STORED, VR::US, PrimitiveValue::from(8_u16)),
+        DataElement::new(tags::HIGH_BIT, VR::US, PrimitiveValue::from(7_u16)),
+        DataElement::new(
+            tags::PIXEL_REPRESENTATION,
+            VR::US,
+            PrimitiveValue::from(0_u16),
+        ),
         DataElement::new(
             tags::NUMBER_OF_FRAMES,
             VR::IS,
@@ -1446,6 +1765,14 @@ fn dicom_bytes(sop_instance_uid: &str, pixel_data: &[u8], waveform_data: Option<
     let mut bytes = Vec::new();
     object.write_all(&mut bytes).unwrap();
     bytes
+}
+
+fn fake_dicom_instance(sop_instance_uid: &'static str, pixel_data: &[u8]) -> FakeInstance {
+    FakeInstance {
+        sop_instance_uid,
+        transfer_syntax_uid: NATIVE_TS,
+        body: dicom_bytes(sop_instance_uid, pixel_data, None),
+    }
 }
 
 fn scope_matches(scope: &RetrieveScope, row: &InstanceMetadata) -> bool {

@@ -216,7 +216,7 @@ impl DicomWebFeatureSet {
     }
 
     pub fn enable_wado_rs(&mut self) {
-        self.wado_rs = Some(WadoRsCapabilities {
+        self.wado_rs.get_or_insert_with(|| WadoRsCapabilities {
             resources: vec![
                 WadoRsResource::Study,
                 WadoRsResource::Series,
@@ -456,6 +456,20 @@ fn study_instance_resource(features: &DicomWebFeatureSet) -> WadLResource {
             "RetrieveStudyPixelData",
             wado_rs,
         ));
+        if let Some(rendered) = &wado_rs.rendered {
+            child_resources.push(rendered_resource(
+                "rendered",
+                "RetrieveStudyRendered",
+                rendered,
+            ));
+        }
+        if let Some(thumbnail) = &wado_rs.thumbnail {
+            child_resources.push(rendered_resource(
+                "thumbnail",
+                "RetrieveStudyThumbnail",
+                thumbnail,
+            ));
+        }
     }
 
     WadLResource {
@@ -493,6 +507,20 @@ fn series_instance_resource(features: &DicomWebFeatureSet) -> WadLResource {
             "RetrieveSeriesPixelData",
             wado_rs,
         ));
+        if let Some(rendered) = &wado_rs.rendered {
+            child_resources.push(rendered_resource(
+                "rendered",
+                "RetrieveSeriesRendered",
+                rendered,
+            ));
+        }
+        if let Some(thumbnail) = &wado_rs.thumbnail {
+            child_resources.push(rendered_resource(
+                "thumbnail",
+                "RetrieveSeriesThumbnail",
+                thumbnail,
+            ));
+        }
     }
 
     WadLResource {
@@ -524,16 +552,49 @@ fn instance_resources(features: &DicomWebFeatureSet) -> Vec<WadLResource> {
         "RetrieveInstancePixelData",
         wado_rs,
     ));
-    child_resources.push(octet_stream_resource(
-        "frames/{FrameList}",
-        "RetrieveFrames",
-        wado_rs,
-    ));
+    if let Some(rendered) = &wado_rs.rendered {
+        child_resources.push(rendered_resource(
+            "rendered",
+            "RetrieveInstanceRendered",
+            rendered,
+        ));
+    }
+    if let Some(thumbnail) = &wado_rs.thumbnail {
+        child_resources.push(rendered_resource(
+            "thumbnail",
+            "RetrieveInstanceThumbnail",
+            thumbnail,
+        ));
+    }
+    child_resources.push(frames_resource(wado_rs));
     vec![WadLResource {
         path: "{SOPInstance}",
         method: vec![wado_method("RetrieveInstance", wado_rs)],
         resource: child_resources,
     }]
+}
+
+fn frames_resource(wado_rs: &WadoRsCapabilities) -> WadLResource {
+    let mut resources = Vec::new();
+    if let Some(rendered) = &wado_rs.rendered {
+        resources.push(rendered_resource(
+            "rendered",
+            "RetrieveRenderedFrames",
+            rendered,
+        ));
+    }
+    if let Some(thumbnail) = &wado_rs.thumbnail {
+        resources.push(rendered_resource(
+            "thumbnail",
+            "RetrieveFrameThumbnail",
+            thumbnail,
+        ));
+    }
+    WadLResource {
+        path: "frames/{FrameList}",
+        method: vec![wado_octet_stream_method("RetrieveFrames", wado_rs)],
+        resource: resources,
+    }
 }
 
 fn octet_stream_resource(
@@ -552,6 +613,18 @@ fn metadata_resource(id: &'static str, metadata: &WadoRsMetadataCapabilities) ->
     WadLResource {
         path: "metadata",
         method: vec![wado_metadata_method(id, metadata)],
+        resource: Vec::new(),
+    }
+}
+
+fn rendered_resource(
+    path: &'static str,
+    id: &'static str,
+    rendered: &RenderedCapabilities,
+) -> WadLResource {
+    WadLResource {
+        path,
+        method: vec![wado_rendered_method(id, rendered)],
         resource: Vec::new(),
     }
 }
@@ -691,6 +764,35 @@ fn wado_metadata_method(id: &'static str, metadata: &WadoRsMetadataCapabilities)
     }
 }
 
+fn wado_rendered_method(id: &'static str, rendered: &RenderedCapabilities) -> WadLMethod {
+    WadLMethod {
+        name: "GET",
+        id,
+        request: Some(WadLRequest {
+            param: rendered
+                .parameters
+                .iter()
+                .copied()
+                .map(|name| WadLParam {
+                    name,
+                    style: "query",
+                    default_value: None,
+                })
+                .collect(),
+            representation: Vec::new(),
+        }),
+        response: vec![WadLResponse {
+            status: "200",
+            representation: rendered
+                .media_types
+                .iter()
+                .copied()
+                .map(representation)
+                .collect(),
+        }],
+    }
+}
+
 fn wado_uri_resource(wado_uri: &WadoUriCapabilities) -> WadLResource {
     WadLResource {
         path: "wado",
@@ -728,5 +830,26 @@ fn representation(media_type: &'static str) -> WadLRepresentation {
     WadLRepresentation {
         media_type,
         param: Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DicomWebFeatureSet;
+
+    #[test]
+    fn enabling_wado_rs_does_not_clear_optional_wado_capabilities() {
+        let mut features = DicomWebFeatureSet::empty();
+
+        features.enable_wado_rs();
+        features.enable_wado_rs_metadata();
+        features.enable_rendered();
+        features.enable_thumbnail();
+        features.enable_wado_rs();
+
+        let wado = features.wado_rs.expect("WADO-RS capabilities");
+        assert!(wado.metadata.is_some());
+        assert!(wado.rendered.is_some());
+        assert!(wado.thumbnail.is_some());
     }
 }

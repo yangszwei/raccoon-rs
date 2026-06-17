@@ -444,7 +444,7 @@ dependencies = [
  "dicom-core",
  "dicom-encoding",
  "jpeg-decoder",
- "jpeg-encoder",
+ "jpeg-encoder 0.6.1",
  "jxl-oxide",
  "lazy_static",
  "tracing",
@@ -1185,6 +1185,12 @@ name = "jpeg-encoder"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b454d911ac55068f53495488d8ccd0646eaa540c033a28ee15b07838afafb01f"
+
+[[package]]
+name = "jpeg-encoder"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0b0b36cbb4e6704f12f5b5d7b01dac593982c6550859ebd5a66fb15c9ea27fd5"
 
 [[package]]
 name = "js-sys"
@@ -2029,6 +2035,7 @@ dependencies = [
  "dicom-object",
  "form_urlencoded",
  "futures-util",
+ "jpeg-encoder 0.7.0",
  "multer",
  "raccoon-contract-dicom",
  "raccoon-contract-object-store",
@@ -2037,6 +2044,8 @@ dependencies = [
  "raccoon-service-retrieve",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
  "thiserror",
  "tokio",
  "tokio-util",

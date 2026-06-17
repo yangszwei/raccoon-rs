@@ -177,6 +177,20 @@ mod tests {
         }
     }
 
+    struct AllCapabilitiesTestProvider;
+
+    impl DicomWebProvider for AllCapabilitiesTestProvider {
+        fn register(&self, registry: &mut DicomWebRouteRegistry) {
+            registry.feature_set_mut().enable_qido_rs();
+            registry.feature_set_mut().enable_stow_rs();
+            registry.feature_set_mut().enable_wado_rs();
+            registry.feature_set_mut().enable_wado_rs_metadata();
+            registry.feature_set_mut().enable_rendered();
+            registry.feature_set_mut().enable_thumbnail();
+            registry.feature_set_mut().enable_wado_uri();
+        }
+    }
+
     #[test]
     fn empty_router_builds() {
         let _router = DicomWebRouter::new().into_router();
@@ -298,6 +312,83 @@ mod tests {
         assert_absent(&payload, "wado");
         assert_absent(&payload, "rendered");
         assert_absent(&payload, "thumbnail");
+    }
+
+    #[tokio::test]
+    async fn wado_options_claims_match_conformance_document() {
+        let payload =
+            options_root_payload(DicomWebRouter::new().register(AllCapabilitiesTestProvider)).await;
+        let text = payload.to_string();
+        let expected_method_ids = [
+            "SearchForStudies",
+            "SearchForSeries",
+            "SearchForInstances",
+            "SearchForStudySeries",
+            "SearchForStudyInstances",
+            "SearchForStudySeriesInstances",
+            "StoreInstances",
+            "StoreStudyInstances",
+            "RetrieveStudy",
+            "RetrieveSeries",
+            "RetrieveInstance",
+            "RetrieveStudyMetadata",
+            "RetrieveSeriesMetadata",
+            "RetrieveInstanceMetadata",
+            "RetrieveBulkData",
+            "RetrieveStudyPixelData",
+            "RetrieveSeriesPixelData",
+            "RetrieveInstancePixelData",
+            "RetrieveFrames",
+            "RetrieveStudyRendered",
+            "RetrieveSeriesRendered",
+            "RetrieveInstanceRendered",
+            "RetrieveRenderedFrames",
+            "RetrieveStudyThumbnail",
+            "RetrieveSeriesThumbnail",
+            "RetrieveInstanceThumbnail",
+            "RetrieveFrameThumbnail",
+            "RetrieveDicomInstance",
+        ];
+
+        for method_id in expected_method_ids {
+            assert_has_method(&payload, method_id);
+        }
+
+        for supported_media_type in [
+            "application/dicom",
+            "application/dicom+json",
+            "application/dicom+xml",
+            "application/octet-stream",
+            "image/jpeg",
+            "image/png",
+        ] {
+            assert!(
+                text.contains(supported_media_type),
+                "OPTIONS / missing {supported_media_type}: {text}"
+            );
+        }
+
+        for rendered_param in ["viewport", "window", "quality"] {
+            assert_has_query_param(&payload, rendered_param);
+        }
+
+        for wado_uri_param in [
+            "requestType",
+            "studyUID",
+            "seriesUID",
+            "objectUID",
+            "contentType",
+            "transferSyntax",
+        ] {
+            assert_has_query_param(&payload, wado_uri_param);
+        }
+
+        assert_has_plain_param_default(&payload, "transfer-syntax", "*");
+        assert!(text.contains("\"@path\":\"wado\""), "{text}");
+        assert!(!text.contains("application/vnd.sun.wadl+xml"), "{text}");
+        assert!(!text.contains("1.2.840.10008.1.2.4.50"), "{text}");
+        assert!(!text.contains("application/pdf"), "{text}");
+        assert!(!text.contains("video/"), "{text}");
     }
 
     #[tokio::test]

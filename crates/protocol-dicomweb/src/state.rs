@@ -7,6 +7,7 @@ use raccoon_service_retrieve::{MetadataRepository, RetrieveService};
 
 use crate::DicomWebFeatureSet;
 use crate::stow::StowRsProviderOptions;
+use crate::wado::RenderService;
 
 /// Shared Axum state for mounted DICOMweb endpoints.
 #[derive(Clone, Default)]
@@ -16,6 +17,8 @@ pub struct DicomWebState {
     pub query: Option<Arc<dyn QueryService>>,
     pub retrieve: Option<Arc<dyn RetrieveService>>,
     pub metadata: Option<Arc<dyn MetadataRepository>>,
+    pub render: Option<Arc<dyn RenderService>>,
+    pub render_default_media_type: Option<String>,
     pub stow: Option<StowRsProviderOptions>,
 }
 
@@ -34,6 +37,8 @@ impl fmt::Debug for DicomWebState {
                 "metadata",
                 &self.metadata.as_ref().map(|_| "MetadataRepository"),
             )
+            .field("render", &self.render.as_ref().map(|_| "RenderService"))
+            .field("render_default_media_type", &self.render_default_media_type)
             .field("stow", &self.stow)
             .finish()
     }

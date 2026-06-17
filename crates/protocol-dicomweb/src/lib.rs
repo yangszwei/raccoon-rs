@@ -33,5 +33,9 @@ pub use uid::{
     transfer_syntax_uid,
 };
 pub use url::{BulkDataPath, BulkDataUri, DicomWebUrlBase, RetrieveUrl};
-pub use wado::WadoRsProvider;
+pub use wado::{
+    FilesystemRenderCache, RenderCache, RenderCacheConfig, RenderError, RenderParams,
+    RenderRequest, RenderResponse, RenderService, RenderedImage, RenderedWadoRsProvider,
+    RendererBackend, RetrieveRenderService, WadoRenderOptions, WadoRsProvider,
+};
 pub use wado_uri::WadoUriProvider;
