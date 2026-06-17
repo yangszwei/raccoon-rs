@@ -24,7 +24,6 @@ pub enum OrchestrationError {
     SqliteReadRepository(#[from] raccoon_adapter_read_sqlite::SqliteReadRepositoryError),
 
     /// Configured network address could not be parsed.
-    #[cfg(feature = "grpc")]
     #[error(transparent)]
     NetworkAddress(#[from] std::net::AddrParseError),
 

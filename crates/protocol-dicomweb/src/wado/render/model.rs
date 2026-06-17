@@ -30,22 +30,41 @@ pub struct RenderParams {
 
 impl RenderParams {
     pub(crate) fn hash_into(&self, hasher: &mut Sha256) {
-        for value in [
-            self.viewport.as_deref(),
-            self.window.as_deref(),
-            self.annotation.as_deref(),
-            self.iccprofile.as_deref(),
+        hash_optional_str(hasher, "viewport", self.viewport.as_deref());
+        hash_optional_str(hasher, "window", self.window.as_deref());
+        hash_optional_u8(hasher, "quality", self.quality);
+        hash_optional_str(hasher, "annotation", self.annotation.as_deref());
+        hash_optional_str(hasher, "iccprofile", self.iccprofile.as_deref());
+        hash_optional_str(
+            hasher,
+            "presentation_state",
             self.presentation_state.as_deref(),
-        ] {
-            if let Some(value) = value {
-                hasher.update(value.as_bytes());
-            }
-            hasher.update(b"|");
-        }
-        if let Some(quality) = self.quality {
-            hasher.update(quality.to_string().as_bytes());
-        }
+        );
     }
+}
+
+fn hash_optional_str(hasher: &mut Sha256, name: &str, value: Option<&str>) {
+    hasher.update(name.as_bytes());
+    hasher.update(b"=");
+    if let Some(value) = value {
+        hasher.update(value.len().to_string().as_bytes());
+        hasher.update(b":");
+        hasher.update(value.as_bytes());
+    } else {
+        hasher.update(b"-");
+    }
+    hasher.update(b";");
+}
+
+fn hash_optional_u8(hasher: &mut Sha256, name: &str, value: Option<u8>) {
+    hasher.update(name.as_bytes());
+    hasher.update(b"=");
+    if let Some(value) = value {
+        hasher.update(value.to_string().as_bytes());
+    } else {
+        hasher.update(b"-");
+    }
+    hasher.update(b";");
 }
 
 #[derive(Debug, Clone)]

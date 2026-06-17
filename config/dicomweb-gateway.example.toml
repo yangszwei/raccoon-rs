@@ -1,14 +1,11 @@
 [app]
-name = "raccoon"
-
-[database]
-type = "sqlite"
+name = "raccoon-dicomweb-gateway"
 
 [dcmtk]
 # path = "/usr/local/bin"
 
 [dicomweb]
-bind_address = "127.0.0.1:8080"
+bind_address = "127.0.0.1:8081"
 base_path = "/dicom-web"
 
 [dicomweb.render_cache]
@@ -21,12 +18,18 @@ default_rendered_media_type = "image/jpeg"
 [filesystem]
 root = "data"
 
+[ingest]
+endpoint = "http://127.0.0.1:50053"
+
+[query]
+endpoint = "http://127.0.0.1:50052"
+
+[retrieve]
+endpoint = "http://127.0.0.1:50054"
+
 [runtime]
 shutdown_timeout_seconds = 30
 force_exit_on_timeout = false
-
-[storage]
-backend = "filesystem"
 
 [telemetry]
 log_level = "info"

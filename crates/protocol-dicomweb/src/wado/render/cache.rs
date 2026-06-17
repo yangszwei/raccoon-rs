@@ -36,28 +36,34 @@ pub struct RenderCacheKey {
 impl RenderCacheKey {
     pub fn new(input: &RenderInput, backend: &str) -> Self {
         let mut hasher = Sha256::new();
-        hasher.update(input.identity.study_instance_uid.as_str());
-        hasher.update(b"|");
-        hasher.update(input.identity.series_instance_uid.as_str());
-        hasher.update(b"|");
-        hasher.update(input.identity.sop_instance_uid.as_str());
-        hasher.update(b"|");
-        hasher.update(input.media_type.as_bytes());
-        hasher.update(b"|");
-        hasher.update(backend.as_bytes());
-        hasher.update(b"|");
-        hasher.update(input.thumbnail.to_string().as_bytes());
-        hasher.update(b"|");
-        for frame in input.frames.iter().flatten() {
-            hasher.update(frame.to_string().as_bytes());
-            hasher.update(b",");
-        }
-        hasher.update(b"|");
-        if let Some(transfer_syntax_uid) = &input.transfer_syntax_uid {
-            hasher.update(transfer_syntax_uid.as_str());
-        }
-        hasher.update(b"|");
+        hasher.update(b"raccoon-render-cache-v2;");
+        hash_str(
+            &mut hasher,
+            "study",
+            input.identity.study_instance_uid.as_str(),
+        );
+        hash_str(
+            &mut hasher,
+            "series",
+            input.identity.series_instance_uid.as_str(),
+        );
+        hash_str(
+            &mut hasher,
+            "instance",
+            input.identity.sop_instance_uid.as_str(),
+        );
+        hash_str(&mut hasher, "media_type", &input.media_type);
+        hash_str(&mut hasher, "backend", backend);
+        hash_str(&mut hasher, "thumbnail", &input.thumbnail.to_string());
+        hash_frames(&mut hasher, input.frames.as_deref());
+        hash_optional_str(
+            &mut hasher,
+            "transfer_syntax",
+            input.transfer_syntax_uid.as_ref().map(|uid| uid.as_str()),
+        );
+        hasher.update(b"params={");
         input.params.hash_into(&mut hasher);
+        hasher.update(b"};");
         let digest = hasher.finalize();
         Self {
             value: hex_lower(&digest),
@@ -70,6 +76,76 @@ impl RenderCacheKey {
             _ => "jpg",
         };
         directory.join(format!("{}.{}", self.value, extension))
+    }
+}
+
+fn hash_str(hasher: &mut Sha256, name: &str, value: &str) {
+    hasher.update(name.as_bytes());
+    hasher.update(b"=");
+    hasher.update(value.len().to_string().as_bytes());
+    hasher.update(b":");
+    hasher.update(value.as_bytes());
+    hasher.update(b";");
+}
+
+fn hash_optional_str(hasher: &mut Sha256, name: &str, value: Option<&str>) {
+    match value {
+        Some(value) => hash_str(hasher, name, value),
+        None => {
+            hasher.update(name.as_bytes());
+            hasher.update(b"=-;");
+        }
+    }
+}
+
+fn hash_frames(hasher: &mut Sha256, frames: Option<&[u32]>) {
+    hasher.update(b"frames=");
+    if let Some(frames) = frames {
+        for frame in frames {
+            hasher.update(frame.to_string().as_bytes());
+            hasher.update(b",");
+        }
+    } else {
+        hasher.update(b"-");
+    }
+    hasher.update(b";");
+}
+
+impl RenderCacheKey {
+    #[cfg(test)]
+    fn as_str(&self) -> &str {
+        &self.value
+    }
+}
+
+#[cfg(test)]
+fn legacy_unlabeled_cache_key(input: &RenderInput, backend: &str) -> RenderCacheKey {
+    let mut hasher = Sha256::new();
+    hasher.update(input.identity.study_instance_uid.as_str());
+    hasher.update(b"|");
+    hasher.update(input.identity.series_instance_uid.as_str());
+    hasher.update(b"|");
+    hasher.update(input.identity.sop_instance_uid.as_str());
+    hasher.update(b"|");
+    hasher.update(input.media_type.as_bytes());
+    hasher.update(b"|");
+    hasher.update(backend.as_bytes());
+    hasher.update(b"|");
+    hasher.update(input.thumbnail.to_string().as_bytes());
+    hasher.update(b"|");
+    for frame in input.frames.iter().flatten() {
+        hasher.update(frame.to_string().as_bytes());
+        hasher.update(b",");
+    }
+    hasher.update(b"|");
+    if let Some(transfer_syntax_uid) = &input.transfer_syntax_uid {
+        hasher.update(transfer_syntax_uid.as_str());
+    }
+    hasher.update(b"|");
+    input.params.hash_into(&mut hasher);
+    let digest = hasher.finalize();
+    RenderCacheKey {
+        value: hex_lower(&digest),
     }
 }
 
@@ -198,5 +274,68 @@ impl RenderCache for NullRenderCache {
 
     async fn put(&self, _key: &RenderCacheKey, _image: &RenderedImage) -> Result<(), RenderError> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use raccoon_contract_dicom::{
+        DicomInstanceIdentity, SeriesInstanceUid, SopClassUid, SopInstanceUid, StudyInstanceUid,
+    };
+
+    use super::*;
+    use crate::wado::render::RenderParams;
+
+    #[test]
+    fn render_cache_key_distinguishes_quality() {
+        let mut low_quality = render_input();
+        low_quality.params.quality = Some(1);
+        let mut high_quality = render_input();
+        high_quality.params.quality = Some(100);
+
+        assert_ne!(
+            RenderCacheKey::new(&low_quality, "dcmtk"),
+            RenderCacheKey::new(&high_quality, "dcmtk")
+        );
+    }
+
+    #[test]
+    fn render_cache_key_uses_labeled_parameter_format() {
+        let input = render_input();
+        let key = RenderCacheKey::new(&input, "dcmtk");
+        let legacy_key = legacy_unlabeled_cache_key(&input, "dcmtk");
+
+        assert_ne!(key, legacy_key);
+        assert_eq!(key.as_str().len(), 64);
+    }
+
+    #[test]
+    fn render_cache_key_distinguishes_viewport() {
+        let mut original = render_input();
+        original.params.viewport = Some("128,128".to_string());
+        let mut resized = render_input();
+        resized.params.viewport = Some("256,256".to_string());
+
+        assert_ne!(
+            RenderCacheKey::new(&original, "dcmtk"),
+            RenderCacheKey::new(&resized, "dcmtk")
+        );
+    }
+
+    fn render_input() -> RenderInput {
+        RenderInput {
+            identity: DicomInstanceIdentity::new(
+                StudyInstanceUid::new("1.2.3").expect("valid UID"),
+                SeriesInstanceUid::new("1.2.3.4").expect("valid UID"),
+                SopInstanceUid::new("1.2.3.4.5").expect("valid UID"),
+                SopClassUid::new("1.2.840.10008.5.1.4.1.1.2").expect("valid UID"),
+            ),
+            transfer_syntax_uid: None,
+            dicom: Bytes::new(),
+            frames: None,
+            media_type: media::IMAGE_JPEG.to_string(),
+            params: RenderParams::default(),
+            thumbnail: false,
+        }
     }
 }

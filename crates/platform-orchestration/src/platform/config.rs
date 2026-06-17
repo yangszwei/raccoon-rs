@@ -1,3 +1,5 @@
+#[cfg(feature = "grpc")]
+use raccoon_platform_config::app::DicomWebGatewayConfig;
 use raccoon_platform_config::app::{
     ApplicationEntityRegistryServiceConfig, DimseGatewayConfig, IngestServiceConfig,
     MonolithConfig, QueryServiceConfig, RetrieveServiceConfig, SyncServiceConfig,
@@ -18,6 +20,12 @@ pub fn load_ingest_config() -> Result<IngestServiceConfig, OrchestrationError> {
 /// Load configuration for the DIMSE gateway binary.
 pub fn load_dimse_gateway_config() -> Result<DimseGatewayConfig, OrchestrationError> {
     DimseGatewayConfig::load().map_err(Into::into)
+}
+
+/// Load configuration for the DICOMweb gateway binary.
+#[cfg(feature = "grpc")]
+pub fn load_dicomweb_gateway_config() -> Result<DicomWebGatewayConfig, OrchestrationError> {
+    DicomWebGatewayConfig::load().map_err(Into::into)
 }
 
 /// Load configuration for the query service binary.

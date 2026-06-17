@@ -19,6 +19,7 @@ grpc = [
 ]
 
 [dependencies]
+axum = "0.8.9"
 raccoon-adapter-ingest-repository-sqlite = { path = "../adapter-ingest-repository-sqlite" }
 raccoon-adapter-object-store-filesystem = { path = "../adapter-object-store-filesystem" }
 raccoon-adapter-read-sqlite = { path = "../adapter-read-sqlite" }
@@ -26,6 +27,7 @@ raccoon-contract-object-store = { path = "../contract-object-store" }
 raccoon-platform-config = { path = "../platform-config" }
 raccoon-platform-runtime = { path = "../platform-runtime" }
 raccoon-platform-telemetry = { path = "../platform-telemetry" }
+raccoon-protocol-dicomweb = { path = "../protocol-dicomweb" }
 raccoon-protocol-dimse = { path = "../protocol-dimse" }
 raccoon-service-application-entity-registry = { path = "../service-application-entity-registry" }
 raccoon-service-ingest = { path = "../service-ingest" }
@@ -33,7 +35,7 @@ raccoon-service-query = { path = "../service-query" }
 raccoon-service-retrieve = { path = "../service-retrieve" }
 raccoon-service-sync = { path = "../service-sync" }
 thiserror = "2.0.18"
-tokio = { version = "1.52.1", features = ["fs", "rt", "signal", "sync"] }
+tokio = { version = "1.52.1", features = ["fs", "net", "rt", "signal", "sync"] }
 tokio-stream = { version = "0.1.17", features = ["net"], optional = true }
 tokio-util = { version = "0.7.18", features = ["rt"] }
 tonic = { version = "0.14.6", optional = true }
@@ -42,3 +44,4 @@ tracing.workspace = true
 
 [dev-dependencies]
 tempfile = "3.23.0"
+tower = "0.5.2"

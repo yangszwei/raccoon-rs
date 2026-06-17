@@ -1,21 +1,27 @@
 use std::convert::Infallible;
+use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::Mutex;
 
+use axum::Router;
 use raccoon_platform_config::app::MonolithConfig;
 use raccoon_platform_runtime::{App, FatalError};
 use raccoon_protocol_dimse::{DimseListener, ServiceClassRegistry};
 use raccoon_service_application_entity_registry::ApplicationEntityRegistry;
 use raccoon_service_sync::{SyncService, SyncWorkerId};
+use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 use tracing::{debug, info, warn};
 
+use crate::component::http::{bind_http_listener, mount_base_path, start_http_server};
 use crate::component::object_store::{ingest_object_store_root, quarantine_object_store_root};
 use crate::contract::ingest_repository::build_ingest_repository_handles;
 use crate::contract::object_store::build_object_store;
 use crate::contract::read_repository::build_read_repository_handles;
 use crate::error::OrchestrationError;
+use crate::protocol::dicomweb::build_dicomweb_router;
 use crate::protocol::dimse::{bind_dimse_listener, build_dimse_service_registry};
 use crate::service::application_entity_registry::build_application_entity_registry;
 use crate::service::ingest::build_ingest_service;
@@ -27,12 +33,22 @@ use crate::service::sync::build_sync_service;
 pub struct MonolithApp {
     sync_service: Arc<dyn SyncService>,
     dimse_endpoints: Vec<DimseEndpoint>,
+    dicomweb_local_addr: SocketAddr,
+    dicomweb_listener: Mutex<Option<TcpListener>>,
+    dicomweb_router: Router,
 }
 
 struct DimseEndpoint {
     listener: Arc<DimseListener>,
     registry: Arc<ServiceClassRegistry>,
     max_concurrent_associations: usize,
+}
+
+impl MonolithApp {
+    /// Return the socket address where the DICOMweb HTTP server is bound.
+    pub fn dicomweb_local_addr(&self) -> SocketAddr {
+        self.dicomweb_local_addr
+    }
 }
 
 /// Build the monolith application from loaded configuration.
@@ -57,6 +73,7 @@ pub async fn build_monolith_app(
         ingest_repositories.ingest_repository.clone(),
     );
     let query_service = build_query_service(read_repositories.query_repository);
+    let metadata_repository = read_repositories.metadata_repository;
     let retrieve_service =
         build_retrieve_service(read_repositories.retrieve_repository, object_store.clone());
     let sync_service = build_sync_service(
@@ -66,7 +83,6 @@ pub async fn build_monolith_app(
         object_store,
         quarantine_object_store,
     );
-
     let application_entity_registry =
         build_application_entity_registry(&config.application_entities)?;
     let local_aes = application_entity_registry
@@ -95,9 +111,24 @@ pub async fn build_monolith_app(
         });
     }
 
+    let dicomweb_router = build_dicomweb_router(
+        ingest_service.clone(),
+        query_service.clone(),
+        retrieve_service.clone(),
+        metadata_repository,
+        &config.dicomweb,
+        &config.dcmtk,
+    );
+    let dicomweb_router = mount_base_path(&config.dicomweb.base_path, dicomweb_router);
+    let (dicomweb_local_addr, dicomweb_listener) =
+        bind_http_listener(&config.app.name, &config.dicomweb.bind_address).await?;
+
     Ok(MonolithApp {
         sync_service,
         dimse_endpoints,
+        dicomweb_local_addr,
+        dicomweb_listener: Mutex::new(Some(dicomweb_listener)),
+        dicomweb_router,
     })
 }
 
@@ -114,6 +145,14 @@ impl App for MonolithApp {
             self.sync_service.clone(),
             shutdown.clone(),
             task_tracker,
+            fatal_tx.clone(),
+        );
+
+        start_dicomweb_server(
+            &self.dicomweb_listener,
+            self.dicomweb_router.clone(),
+            shutdown.clone(),
+            task_tracker,
             fatal_tx,
         );
 
@@ -125,6 +164,33 @@ impl App for MonolithApp {
     async fn shutdown(&self) -> Result<(), Self::ShutdownError> {
         Ok(())
     }
+}
+
+fn start_dicomweb_server(
+    listener: &Mutex<Option<TcpListener>>,
+    router: Router,
+    shutdown: CancellationToken,
+    task_tracker: &TaskTracker,
+    fatal_tx: mpsc::UnboundedSender<FatalError>,
+) {
+    let Some(listener) = listener.lock().expect("dicomweb listener lock").take() else {
+        let _ = fatal_tx.send(FatalError::new(
+            "dicomweb",
+            "http-server",
+            std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "HTTP server already started",
+            ),
+        ));
+        return;
+    };
+
+    let server = axum::serve(listener, router).with_graceful_shutdown(async move {
+        info!("DICOMweb HTTP server graceful shutdown started");
+        shutdown.cancelled().await;
+        info!("DICOMweb HTTP server graceful shutdown finished");
+    });
+    start_http_server("dicomweb", server, task_tracker, fatal_tx);
 }
 
 fn start_sync_worker(
@@ -193,6 +259,7 @@ mod tests {
             max_concurrent_associations: 1,
             ..LocalApplicationEntityConfig::default()
         }];
+        config.dicomweb.bind_address = "127.0.0.1:0".to_string();
         config
     }
 
@@ -212,6 +279,8 @@ mod tests {
             .expect("listener has local address");
         assert_eq!(local_addr.ip().to_string(), "127.0.0.1");
         assert_ne!(local_addr.port(), 0);
+        assert_eq!(app.dicomweb_local_addr().ip().to_string(), "127.0.0.1");
+        assert_ne!(app.dicomweb_local_addr().port(), 0);
         assert!(filesystem_root.path().join("ingest/ingest.db").exists());
         assert!(filesystem_root.path().join("read/read.db").exists());
 

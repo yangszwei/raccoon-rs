@@ -57,14 +57,14 @@ impl RendererBackend for DcmtkRenderer {
     }
 
     async fn render(&self, input: &RenderInput) -> Result<RenderedImage, BackendRenderError> {
-        if input.media_type != media::IMAGE_JPEG {
+        if input.media_type != media::IMAGE_JPEG && input.media_type != media::IMAGE_PNG {
             return Err(BackendRenderError::Unsupported(
-                "dcmj2pnm fallback supports JPEG output only".to_string(),
+                "dcmtk fallback supports JPEG and PNG output only".to_string(),
             ));
         }
+        let input = input.clone();
         let executable = self.path.clone();
-        let dicom = input.dicom.clone();
-        tokio::task::spawn_blocking(move || render_dcmtk(&executable, &dicom))
+        tokio::task::spawn_blocking(move || render_dcmtk(&executable, input))
             .await
             .map_err(|error| BackendRenderError::Failed(format!("dcmtk task failed: {error}")))?
     }
@@ -75,6 +75,28 @@ struct RgbImage {
     width: u32,
     height: u32,
     pixels: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+struct Viewport {
+    output_width: u32,
+    output_height: u32,
+    crop: Option<ViewportCrop>,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+struct ViewportCrop {
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum WindowFunction {
+    Linear,
+    LinearExact,
+    Sigmoid,
 }
 
 fn render_native(input: RenderInput) -> Result<RenderedImage, BackendRenderError> {
@@ -108,17 +130,24 @@ fn render_native(input: RenderInput) -> Result<RenderedImage, BackendRenderError
     })
 }
 
-fn render_dcmtk(executable: &Path, dicom: &Bytes) -> Result<RenderedImage, BackendRenderError> {
-    let input = NamedTempFile::new()
+fn render_dcmtk(
+    executable: &Path,
+    input: RenderInput,
+) -> Result<RenderedImage, BackendRenderError> {
+    let dicom_file = NamedTempFile::new()
         .map_err(|error| BackendRenderError::Failed(format!("temp input failed: {error}")))?;
-    std::fs::write(input.path(), dicom)
+    std::fs::write(dicom_file.path(), &input.dicom)
         .map_err(|error| BackendRenderError::Failed(format!("temp input write failed: {error}")))?;
-    let output = NamedTempFile::new()
+    let output_file = NamedTempFile::new()
         .map_err(|error| BackendRenderError::Failed(format!("temp output failed: {error}")))?;
-    let status = Command::new(executable)
-        .arg("+oj")
-        .arg(input.path())
-        .arg(output.path())
+    let args = dcmtk_render_args(&input)?;
+    let mut command = Command::new(executable);
+    for arg in args {
+        command.arg(arg);
+    }
+    let status = command
+        .arg(dicom_file.path())
+        .arg(output_file.path())
         .status()
         .map_err(|error| BackendRenderError::Failed(format!("dcmtk execution failed: {error}")))?;
     if !status.success() {
@@ -126,13 +155,57 @@ fn render_dcmtk(executable: &Path, dicom: &Bytes) -> Result<RenderedImage, Backe
             "dcmtk exited with status {status}"
         )));
     }
-    let bytes = std::fs::read(output.path()).map_err(|error| {
+    let bytes = std::fs::read(output_file.path()).map_err(|error| {
         BackendRenderError::Failed(format!("dcmtk output read failed: {error}"))
     })?;
+    let mut image = parse_pnm(&bytes)?;
+    if let Some(viewport) = input.params.viewport.as_deref() {
+        image = apply_viewport(image, viewport)?;
+    } else if input.thumbnail {
+        image = constrain_thumbnail(image);
+    }
+    let bytes = match input.media_type.as_str() {
+        media::IMAGE_JPEG => encode_jpeg(&image, input.params.quality)?,
+        media::IMAGE_PNG => encode_png(&image),
+        _ => unreachable!("media type checked before DCMTK rendering"),
+    };
     Ok(RenderedImage {
-        media_type: media::IMAGE_JPEG.to_string(),
+        media_type: input.media_type,
         bytes: Bytes::from(bytes),
     })
+}
+
+fn dcmtk_render_args(input: &RenderInput) -> Result<Vec<String>, BackendRenderError> {
+    let mut args = vec!["+op".to_string()];
+
+    match input.frames.as_deref() {
+        Some([frame]) => {
+            args.push("+F".to_string());
+            args.push(frame.to_string());
+        }
+        Some([]) | None => {}
+        Some(_) => {
+            return Err(BackendRenderError::Unsupported(
+                "dcmtk fallback renders one frame per image".to_string(),
+            ));
+        }
+    }
+
+    if let Some(window) = input.params.window.as_deref() {
+        let (center, width, function) = parse_window(window)?;
+        args.push("+Ww".to_string());
+        args.push(center.to_string());
+        args.push(width.to_string());
+        match function {
+            WindowFunction::Linear | WindowFunction::LinearExact => {
+                args.push("+Wfl".to_string());
+            }
+            WindowFunction::Sigmoid => {
+                args.push("+Wfs".to_string());
+            }
+        }
+    }
+    Ok(args)
 }
 
 fn parse_object(input: &RenderInput) -> Result<DefaultDicomObject, BackendRenderError> {
@@ -158,6 +231,115 @@ fn parse_object(input: &RenderInput) -> Result<DefaultDicomObject, BackendRender
                 .with_meta(FileMetaTableBuilder::new().transfer_syntax(transfer_syntax))
                 .map_err(|error| BackendRenderError::Failed(format!("DICOM meta failed: {error}")))
         }
+    }
+}
+
+fn parse_pnm(bytes: &[u8]) -> Result<RgbImage, BackendRenderError> {
+    let mut cursor = PnmCursor::new(bytes);
+    let magic = cursor.token()?;
+    if magic != "P5" && magic != "P6" {
+        return Err(BackendRenderError::Failed(format!(
+            "unsupported dcmtk PNM format {magic}"
+        )));
+    }
+    let width = cursor.u32_token("width")?;
+    let height = cursor.u32_token("height")?;
+    let max_value = cursor.u32_token("max value")?;
+    if max_value != 255 {
+        return Err(BackendRenderError::Failed(format!(
+            "unsupported dcmtk PNM max value {max_value}"
+        )));
+    }
+    cursor.skip_ascii_whitespace();
+    let samples = if magic == "P6" { 3 } else { 1 };
+    let expected_len = width as usize * height as usize * samples;
+    let data = cursor.remaining();
+    if data.len() < expected_len {
+        return Err(BackendRenderError::Failed(
+            "truncated dcmtk PNM output".to_string(),
+        ));
+    }
+    let pixels = if samples == 3 {
+        data[..expected_len].to_vec()
+    } else {
+        data[..expected_len]
+            .iter()
+            .flat_map(|value| [*value; 3])
+            .collect()
+    };
+    Ok(RgbImage {
+        width,
+        height,
+        pixels,
+    })
+}
+
+struct PnmCursor<'a> {
+    bytes: &'a [u8],
+    offset: usize,
+}
+
+impl<'a> PnmCursor<'a> {
+    fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, offset: 0 }
+    }
+
+    fn token(&mut self) -> Result<String, BackendRenderError> {
+        self.skip_ascii_whitespace_and_comments();
+        let start = self.offset;
+        while self
+            .bytes
+            .get(self.offset)
+            .is_some_and(|byte| !byte.is_ascii_whitespace())
+        {
+            self.offset += 1;
+        }
+        if self.offset == start {
+            return Err(BackendRenderError::Failed(
+                "invalid dcmtk PNM header".to_string(),
+            ));
+        }
+        std::str::from_utf8(&self.bytes[start..self.offset])
+            .map(str::to_string)
+            .map_err(|error| {
+                BackendRenderError::Failed(format!("invalid dcmtk PNM token: {error}"))
+            })
+    }
+
+    fn u32_token(&mut self, name: &str) -> Result<u32, BackendRenderError> {
+        self.token()?
+            .parse::<u32>()
+            .map_err(|_| BackendRenderError::Failed(format!("invalid dcmtk PNM {name}")))
+    }
+
+    fn skip_ascii_whitespace_and_comments(&mut self) {
+        loop {
+            self.skip_ascii_whitespace();
+            if self.bytes.get(self.offset) != Some(&b'#') {
+                return;
+            }
+            while self
+                .bytes
+                .get(self.offset)
+                .is_some_and(|byte| *byte != b'\n')
+            {
+                self.offset += 1;
+            }
+        }
+    }
+
+    fn skip_ascii_whitespace(&mut self) {
+        while self
+            .bytes
+            .get(self.offset)
+            .is_some_and(|byte| byte.is_ascii_whitespace())
+        {
+            self.offset += 1;
+        }
+    }
+
+    fn remaining(&self) -> &'a [u8] {
+        &self.bytes[self.offset..]
     }
 }
 
@@ -237,7 +419,7 @@ fn requested_frame(input: &RenderInput) -> Result<usize, BackendRenderError> {
 }
 
 fn apply_window(mut image: RgbImage, window: &str) -> Result<RgbImage, BackendRenderError> {
-    let (center, width) = parse_window(window)?;
+    let (center, width, _) = parse_window(window)?;
     let low = center - width / 2.0;
     for value in &mut image.pixels {
         let normalized = ((*value as f64 - low) / width * 255.0).clamp(0.0, 255.0);
@@ -247,6 +429,20 @@ fn apply_window(mut image: RgbImage, window: &str) -> Result<RgbImage, BackendRe
 }
 
 fn apply_viewport(image: RgbImage, viewport: &str) -> Result<RgbImage, BackendRenderError> {
+    let viewport = parse_viewport(viewport)?;
+    let source = if let Some(crop) = viewport.crop {
+        crop_image(image, crop.x, crop.y, crop.width, crop.height)?
+    } else {
+        image
+    };
+    Ok(resize_nearest(
+        source,
+        viewport.output_width,
+        viewport.output_height,
+    ))
+}
+
+fn parse_viewport(viewport: &str) -> Result<Viewport, BackendRenderError> {
     let values = viewport
         .split(',')
         .map(|part| {
@@ -261,16 +457,25 @@ fn apply_viewport(image: RgbImage, viewport: &str) -> Result<RgbImage, BackendRe
     }
     let output_width = positive_u32(values[0], "viewport width")?;
     let output_height = positive_u32(values[1], "viewport height")?;
-    let source = if values.len() == 6 {
+    let crop = if values.len() == 6 {
         let source_x = non_negative_u32(values[2], "viewport source x")?;
         let source_y = non_negative_u32(values[3], "viewport source y")?;
         let source_width = positive_u32(values[4], "viewport source width")?;
         let source_height = positive_u32(values[5], "viewport source height")?;
-        crop(image, source_x, source_y, source_width, source_height)?
+        Some(ViewportCrop {
+            x: source_x,
+            y: source_y,
+            width: source_width,
+            height: source_height,
+        })
     } else {
-        image
+        None
     };
-    Ok(resize_nearest(source, output_width, output_height))
+    Ok(Viewport {
+        output_width,
+        output_height,
+        crop,
+    })
 }
 
 fn constrain_thumbnail(image: RgbImage) -> RgbImage {
@@ -284,7 +489,7 @@ fn constrain_thumbnail(image: RgbImage) -> RgbImage {
     resize_nearest(image, width, height)
 }
 
-fn crop(
+fn crop_image(
     image: RgbImage,
     source_x: u32,
     source_y: u32,
@@ -328,7 +533,7 @@ fn resize_nearest(image: RgbImage, output_width: u32, output_height: u32) -> Rgb
     }
 }
 
-fn parse_window(window: &str) -> Result<(f64, f64), BackendRenderError> {
+fn parse_window(window: &str) -> Result<(f64, f64, WindowFunction), BackendRenderError> {
     let parts = window.split(',').collect::<Vec<_>>();
     if !matches!(parts.len(), 2 | 3) {
         return Err(BackendRenderError::Unsupported(
@@ -346,15 +551,17 @@ fn parse_window(window: &str) -> Result<(f64, f64), BackendRenderError> {
             "window width must be positive".to_string(),
         ));
     }
-    match parts.get(2).copied().unwrap_or("linear") {
-        "linear" | "linear-exact" | "sigmoid" | "LINEAR" | "LINEAR_EXACT" | "SIGMOID" => {}
+    let function = match parts.get(2).copied().unwrap_or("linear") {
+        "linear" | "LINEAR" => WindowFunction::Linear,
+        "linear-exact" | "LINEAR_EXACT" => WindowFunction::LinearExact,
+        "sigmoid" | "SIGMOID" => WindowFunction::Sigmoid,
         value => {
             return Err(BackendRenderError::Unsupported(format!(
                 "unsupported window function {value}"
             )));
         }
-    }
-    Ok((center, width))
+    };
+    Ok((center, width, function))
 }
 
 fn positive_u32(value: f64, name: &str) -> Result<u32, BackendRenderError> {
@@ -482,4 +689,102 @@ fn required_str(object: &DefaultDicomObject, tag: Tag) -> Result<String, Backend
         .to_str()
         .map(|value| value.trim().to_string())
         .map_err(|_| BackendRenderError::Unsupported(format!("invalid image tag {tag}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use raccoon_contract_dicom::{
+        DicomInstanceIdentity, SeriesInstanceUid, SopClassUid, SopInstanceUid, StudyInstanceUid,
+    };
+
+    use super::*;
+    use crate::wado::render::RenderParams;
+
+    #[test]
+    fn dcmtk_render_args_include_frame_and_window_controls() {
+        let mut input = render_input();
+        input.frames = Some(vec![2]);
+        input.params.window = Some("128,256,sigmoid".to_string());
+
+        assert_eq!(
+            dcmtk_render_args(&input).expect("valid args"),
+            ["+op", "+F", "2", "+Ww", "128", "256", "+Wfs"]
+        );
+    }
+
+    #[test]
+    fn dcmtk_render_args_omit_post_processed_controls() {
+        let mut input = render_input();
+        input.params.viewport = Some("320,240,10,20,100,80".to_string());
+        input.params.quality = Some(100);
+        input.thumbnail = true;
+
+        assert_eq!(dcmtk_render_args(&input).expect("valid args"), ["+op"]);
+    }
+
+    #[test]
+    fn dcmtk_render_args_omit_unspecified_controls() {
+        assert_eq!(
+            dcmtk_render_args(&render_input()).expect("valid args"),
+            ["+op"]
+        );
+    }
+
+    #[test]
+    fn parse_pnm_decodes_grayscale_as_rgb() {
+        let image = parse_pnm(b"P5\n2 1\n255\n\x00\xff").expect("valid PGM");
+
+        assert_eq!(image.width, 2);
+        assert_eq!(image.height, 1);
+        assert_eq!(image.pixels, [0, 0, 0, 255, 255, 255]);
+    }
+
+    #[test]
+    fn parse_pnm_decodes_rgb() {
+        let image = parse_pnm(b"P6\n# comment\n1 1\n255\n\x01\x02\x03").expect("valid PPM");
+
+        assert_eq!(image.width, 1);
+        assert_eq!(image.height, 1);
+        assert_eq!(image.pixels, [1, 2, 3]);
+    }
+
+    #[test]
+    fn encode_jpeg_uses_quality() {
+        let image = RgbImage {
+            width: 16,
+            height: 16,
+            pixels: (0..16)
+                .flat_map(|y| {
+                    (0..16).flat_map(move |x| {
+                        let red = x * 16;
+                        let green = y * 16;
+                        [red, green, red ^ green]
+                    })
+                })
+                .collect(),
+        };
+
+        let low_quality = encode_jpeg(&image, Some(1)).expect("low quality JPEG");
+        let high_quality = encode_jpeg(&image, Some(100)).expect("high quality JPEG");
+
+        assert_ne!(low_quality, high_quality);
+        assert_ne!(low_quality.len(), high_quality.len());
+    }
+
+    fn render_input() -> RenderInput {
+        RenderInput {
+            identity: DicomInstanceIdentity::new(
+                StudyInstanceUid::new("1.2.3").expect("valid UID"),
+                SeriesInstanceUid::new("1.2.3.4").expect("valid UID"),
+                SopInstanceUid::new("1.2.3.4.5").expect("valid UID"),
+                SopClassUid::new("1.2.840.10008.5.1.4.1.1.2").expect("valid UID"),
+            ),
+            transfer_syntax_uid: None,
+            dicom: Bytes::new(),
+            frames: None,
+            media_type: media::IMAGE_JPEG.to_string(),
+            params: RenderParams::default(),
+            thumbnail: false,
+        }
+    }
 }

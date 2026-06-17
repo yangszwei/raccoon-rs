@@ -1949,6 +1949,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "raccoon-dicomweb-gateway"
+version = "0.1.0"
+dependencies = [
+ "raccoon-platform-orchestration",
+ "tokio",
+]
+
+[[package]]
 name = "raccoon-dimse-gateway"
 version = "0.1.0"
 dependencies = [
@@ -1977,6 +1985,7 @@ dependencies = [
 name = "raccoon-platform-orchestration"
 version = "0.1.0"
 dependencies = [
+ "axum",
  "raccoon-adapter-ingest-repository-sqlite",
  "raccoon-adapter-object-store-filesystem",
  "raccoon-adapter-read-sqlite",
@@ -1984,6 +1993,7 @@ dependencies = [
  "raccoon-platform-config",
  "raccoon-platform-runtime",
  "raccoon-platform-telemetry",
+ "raccoon-protocol-dicomweb",
  "raccoon-protocol-dimse",
  "raccoon-service-application-entity-registry",
  "raccoon-service-ingest",
@@ -1997,6 +2007,7 @@ dependencies = [
  "tokio-util",
  "tonic",
  "tonic-health",
+ "tower",
  "tracing",
 ]
 
