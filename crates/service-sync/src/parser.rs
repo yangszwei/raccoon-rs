@@ -8,7 +8,7 @@ use dicom_object::{
 use futures_util::StreamExt;
 use raccoon_contract_dicom::{
     DicomInstanceIdentity, SeriesInstanceUid, SopClassUid, SopInstanceUid, StudyInstanceUid,
-    TransferSyntaxUid,
+    TransferSyntaxUid, is_bulk_data_element,
 };
 use raccoon_contract_object_store::{ByteStream, Bytes, ObjectKey, Result as ObjectStoreResult};
 use raccoon_service_ingest::IngestPayloadRepresentation;
@@ -391,7 +391,7 @@ fn normalize_attributes_object(
             }
         }
 
-        if is_bulk_data_marker_tag(&tag, parent_sequence) {
+        if is_bulk_data_element(&tag, parent_sequence) {
             let vr = object
                 .get(&tag)
                 .and_then(|element| element.get("vr"))
@@ -404,37 +404,6 @@ fn normalize_attributes_object(
 
 fn is_pixel_data_tag(tag: &str) -> bool {
     matches!(tag, "7FE00008" | "7FE00009" | "7FE00010")
-}
-
-fn is_bulk_data_marker_tag(tag: &str, parent_sequence: Option<&str>) -> bool {
-    if parent_sequence == Some("54000100") && tag == "54001010" {
-        return true;
-    }
-    match tag {
-        "00281201" | "00281202" | "00281203" | "00281204" | "00281211" | "00281212"
-        | "00281213" | "00281221" | "00281222" | "00281223" | "00281224" | "00283006"
-        | "00287FE0" | "00420011" | "56000020" => true,
-        _ => is_repeating_group_bulk_data_tag(tag),
-    }
-}
-
-fn is_repeating_group_bulk_data_tag(tag: &str) -> bool {
-    let Some((group, element)) = tag_group_element(tag) else {
-        return false;
-    };
-    matches!(
-        (group, element),
-        (0x5000..=0x50FF, 0x200C | 0x3000) | (0x6000..=0x60FF, 0x3000)
-    )
-}
-
-fn tag_group_element(tag: &str) -> Option<(u16, u16)> {
-    if tag.len() != 8 {
-        return None;
-    }
-    let group = u16::from_str_radix(&tag[..4], 16).ok()?;
-    let element = u16::from_str_radix(&tag[4..], 16).ok()?;
-    Some((group, element))
 }
 
 fn required_text(object: &InMemDicomObject, name: &'static str) -> Result<String, SyncParseError> {

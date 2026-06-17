@@ -235,7 +235,10 @@ mod tests {
         assert_has_query_param(&payload, "offset");
         assert_absent(&payload, "StoreInstances");
         assert_absent(&payload, "RetrieveStudy");
-        assert_absent(&payload, "application/dicom+xml");
+        assert_has_representation(
+            &payload,
+            "multipart/related; type=\\\"application/dicom+xml\\\"",
+        );
         assert_absent(&payload, "rendered");
         assert_absent(&payload, "thumbnail");
     }
@@ -259,13 +262,15 @@ mod tests {
 
         assert_has_method(&payload, "RetrieveStudy");
         assert_has_method(&payload, "RetrieveSeries");
+        assert_has_method(&payload, "RetrieveBulkData");
+        assert_has_method(&payload, "RetrieveStudyPixelData");
+        assert_has_method(&payload, "RetrieveFrames");
         assert_has_representation(&payload, "application/dicom");
+        assert_has_representation(&payload, "application/octet-stream");
         assert_has_plain_param_default(&payload, "transfer-syntax", "*");
         assert_absent(&payload, "SearchForStudies");
         assert_absent(&payload, "StoreInstances");
         assert_absent(&payload, "metadata");
-        assert_absent(&payload, "bulkdata");
-        assert_absent(&payload, "pixeldata");
         assert_absent(&payload, "rendered");
         assert_absent(&payload, "thumbnail");
     }
@@ -286,8 +291,10 @@ mod tests {
         assert_has_method(&payload, "RetrieveSeries");
         assert_has_representation(&payload, "application/dicom");
         assert_has_representation(&payload, "application/dicom+json");
-        assert_absent(&payload, "application/dicom+xml");
-        assert_absent(&payload, "multipart/related");
+        assert_has_representation(
+            &payload,
+            "multipart/related; type=\\\"application/dicom+xml\\\"",
+        );
         assert_absent(&payload, "wado");
         assert_absent(&payload, "rendered");
         assert_absent(&payload, "thumbnail");

@@ -13,6 +13,7 @@ pub const APPLICATION_DICOM_JSON: &str = "application/dicom+json";
 pub const APPLICATION_DICOM_XML: &str = "application/dicom+xml";
 pub const APPLICATION_OCTET_STREAM: &str = "application/octet-stream";
 pub const MULTIPART_RELATED: &str = "multipart/related";
+pub const MULTIPART_RELATED_DICOM_XML: &str = "multipart/related; type=\"application/dicom+xml\"";
 pub const IMAGE_JPEG: &str = "image/jpeg";
 pub const IMAGE_PNG: &str = "image/png";
 
@@ -85,6 +86,18 @@ pub struct SelectedRepresentation {
     pub params: MediaTypeParams,
 }
 
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct AvailableRepresentation {
+    pub media_type: MediaType,
+    pub params: MediaTypeParams,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum DicomJsonOrXmlMultipart {
+    Json,
+    XmlMultipart,
+}
+
 impl SelectedRepresentation {
     pub fn content_type(&self) -> String {
         content_type(self.media_type, &self.params)
@@ -105,10 +118,32 @@ impl SelectedRepresentation {
     }
 }
 
+impl DicomJsonOrXmlMultipart {
+    pub fn selected_media_type(self) -> &'static str {
+        match self {
+            Self::Json => APPLICATION_DICOM_JSON,
+            Self::XmlMultipart => MULTIPART_RELATED_DICOM_XML,
+        }
+    }
+}
+
 pub fn negotiate_response(
     headers: &HeaderMap,
     accept_query: Option<&str>,
     available: &[MediaType],
+) -> Result<SelectedRepresentation, DicomWebError> {
+    let available = available
+        .iter()
+        .copied()
+        .map(AvailableRepresentation::from)
+        .collect::<Vec<_>>();
+    negotiate_representation(headers, accept_query, &available)
+}
+
+pub fn negotiate_representation(
+    headers: &HeaderMap,
+    accept_query: Option<&str>,
+    available: &[AvailableRepresentation],
 ) -> Result<SelectedRepresentation, DicomWebError> {
     if available.is_empty() {
         return Err(DicomWebError::not_acceptable(
@@ -132,8 +167,8 @@ pub fn negotiate_response(
 
     let Some(source) = source else {
         return Ok(SelectedRepresentation {
-            media_type: available[0],
-            params: MediaTypeParams::default(),
+            media_type: available[0].media_type,
+            params: available[0].params.clone(),
         });
     };
 
@@ -142,12 +177,37 @@ pub fn negotiate_response(
         .iter()
         .filter(|range| range.q_millis > 0)
         .flat_map(|range| {
-            available.iter().filter_map(move |candidate| {
-                range.matches(*candidate).then_some(SelectedRepresentation {
-                    media_type: *candidate,
-                    params: range.params.clone(),
-                })
-            })
+            available
+                .iter()
+                .filter(|candidate| range.matches_representation(candidate))
+                .map(|candidate| range.select(candidate))
+        })
+        .next()
+        .ok_or_else(|| {
+            DicomWebError::not_acceptable("no acceptable DICOMweb response representation")
+        })
+}
+
+pub fn negotiate_dicom_json_or_xml_multipart(
+    headers: &HeaderMap,
+) -> Result<DicomJsonOrXmlMultipart, DicomWebError> {
+    let Some(value) = headers.get(header::ACCEPT) else {
+        return Ok(DicomJsonOrXmlMultipart::Json);
+    };
+    let value = value
+        .to_str()
+        .map_err(|_| DicomWebError::not_acceptable("invalid Accept header"))?;
+    let ranges = parse_accept(value)?;
+    ranges
+        .iter()
+        .filter(|range| range.q_millis > 0)
+        .flat_map(|range| {
+            [
+                DicomJsonOrXmlMultipart::Json,
+                DicomJsonOrXmlMultipart::XmlMultipart,
+            ]
+            .into_iter()
+            .filter(move |candidate| range.matches_dicom_json_or_xml_multipart(*candidate))
         })
         .next()
         .ok_or_else(|| {
@@ -238,6 +298,36 @@ fn response_with_content_type(
 }
 
 impl MediaRange {
+    fn matches_representation(&self, candidate: &AvailableRepresentation) -> bool {
+        if !self.matches(candidate.media_type) {
+            return false;
+        }
+        match (
+            self.params.type_.as_deref(),
+            candidate.params.type_.as_deref(),
+        ) {
+            (Some(requested), Some(available)) => requested == available,
+            _ => true,
+        }
+    }
+
+    fn select(&self, candidate: &AvailableRepresentation) -> SelectedRepresentation {
+        let mut params = candidate.params.clone();
+        if self.params.type_.is_some() {
+            params.type_ = self.params.type_.clone();
+        }
+        if self.params.transfer_syntax.is_some() {
+            params.transfer_syntax = self.params.transfer_syntax.clone();
+        }
+        if self.params.charset.is_some() {
+            params.charset = self.params.charset.clone();
+        }
+        SelectedRepresentation {
+            media_type: candidate.media_type,
+            params,
+        }
+    }
+
     fn matches(&self, candidate: MediaType) -> bool {
         if self.type_wildcard {
             return true;
@@ -249,6 +339,20 @@ impl MediaRange {
                 .is_some_and(|type_| type_ == type_part(candidate));
         }
         self.media_type == Some(candidate)
+    }
+
+    fn matches_dicom_json_or_xml_multipart(&self, candidate: DicomJsonOrXmlMultipart) -> bool {
+        match candidate {
+            DicomJsonOrXmlMultipart::Json => self.matches(MediaType::ApplicationDicomJson),
+            DicomJsonOrXmlMultipart::XmlMultipart => {
+                self.matches(MediaType::MultipartRelated)
+                    && self
+                        .params
+                        .type_
+                        .as_deref()
+                        .is_none_or(|type_| type_.eq_ignore_ascii_case(APPLICATION_DICOM_XML))
+            }
+        }
     }
 
     fn specificity(&self) -> u8 {
@@ -346,6 +450,15 @@ impl PartialOrd for MediaRange {
     }
 }
 
+impl From<MediaType> for AvailableRepresentation {
+    fn from(media_type: MediaType) -> Self {
+        Self {
+            media_type,
+            params: MediaTypeParams::default(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use axum::http::{HeaderMap, HeaderValue, header};
@@ -420,6 +533,63 @@ mod tests {
                 .expect("selected media");
 
         assert_eq!(selected.media_type, MediaType::ImagePng);
+    }
+
+    #[test]
+    fn wildcard_selects_available_representation_params() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::ACCEPT, HeaderValue::from_static("*/*"));
+
+        let selected = negotiate_representation(
+            &headers,
+            None,
+            &[AvailableRepresentation {
+                media_type: MediaType::MultipartRelated,
+                params: MediaTypeParams {
+                    type_: Some(APPLICATION_OCTET_STREAM.to_string()),
+                    transfer_syntax: None,
+                    charset: None,
+                },
+            }],
+        )
+        .expect("selected media");
+
+        assert_eq!(selected.media_type, MediaType::MultipartRelated);
+        assert_eq!(
+            selected.params.type_.as_deref(),
+            Some(APPLICATION_OCTET_STREAM)
+        );
+    }
+
+    #[test]
+    fn incompatible_multipart_type_falls_through_to_wildcard() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::ACCEPT,
+            HeaderValue::from_static(
+                "multipart/related; type=\"application/dicom\";q=1.0, */*;q=0.5",
+            ),
+        );
+
+        let selected = negotiate_representation(
+            &headers,
+            None,
+            &[AvailableRepresentation {
+                media_type: MediaType::MultipartRelated,
+                params: MediaTypeParams {
+                    type_: Some(APPLICATION_OCTET_STREAM.to_string()),
+                    transfer_syntax: None,
+                    charset: None,
+                },
+            }],
+        )
+        .expect("selected media");
+
+        assert_eq!(selected.media_type, MediaType::MultipartRelated);
+        assert_eq!(
+            selected.params.type_.as_deref(),
+            Some(APPLICATION_OCTET_STREAM)
+        );
     }
 
     #[test]

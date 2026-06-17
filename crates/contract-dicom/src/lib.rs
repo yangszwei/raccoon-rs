@@ -7,11 +7,13 @@
 //! [`PatientRootQueryRetrieveLevel`] for Patient Root — keeping invalid level/model
 //! combinations unrepresentable at the type level.
 
+mod bulk_data;
 mod identity;
 mod level;
 mod metadata;
 mod uid;
 
+pub use bulk_data::is_bulk_data_element;
 pub use identity::{DicomInstanceIdentity, DicomSeriesIdentity, DicomStudyIdentity};
 pub use level::{PatientRootQueryRetrieveLevel, StudyRootQueryRetrieveLevel};
 pub use metadata::{

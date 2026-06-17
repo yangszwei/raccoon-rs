@@ -1,7 +1,8 @@
 use serde::Serialize;
 
 use crate::media::{
-    APPLICATION_DICOM, APPLICATION_DICOM_JSON, APPLICATION_DICOM_XML, IMAGE_JPEG, IMAGE_PNG,
+    APPLICATION_DICOM, APPLICATION_DICOM_JSON, APPLICATION_DICOM_XML, APPLICATION_OCTET_STREAM,
+    IMAGE_JPEG, IMAGE_PNG, MULTIPART_RELATED_DICOM_XML,
 };
 
 pub const TRANSFER_SYNTAX_ANY: &str = "*";
@@ -59,6 +60,8 @@ pub struct WadoRsCapabilities {
     pub response_media_types: Vec<&'static str>,
     pub transfer_syntaxes: Vec<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<WadoRsMetadataCapabilities>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub rendered: Option<RenderedCapabilities>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thumbnail: Option<RenderedCapabilities>,
@@ -70,6 +73,15 @@ pub enum WadoRsResource {
     Study,
     Series,
     Instance,
+    BulkData,
+    PixelData,
+    Frames,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WadoRsMetadataCapabilities {
+    pub response_media_types: Vec<&'static str>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize)]
@@ -178,8 +190,14 @@ impl DicomWebFeatureSet {
                 QidoRsResource::StudyInstances,
                 QidoRsResource::SeriesInstances,
             ],
-            response_media_types: vec![APPLICATION_DICOM_JSON],
-            query_parameters: vec!["limit", "offset", "fuzzymatching", "includefield"],
+            response_media_types: vec![APPLICATION_DICOM_JSON, MULTIPART_RELATED_DICOM_XML],
+            query_parameters: vec![
+                "limit",
+                "offset",
+                "fuzzymatching",
+                "timezoneoffset",
+                "includefield",
+            ],
             max_results: 100,
         });
     }
@@ -187,7 +205,11 @@ impl DicomWebFeatureSet {
     pub fn enable_stow_rs(&mut self) {
         self.stow_rs = Some(StowRsCapabilities {
             resources: vec![StowRsResource::Studies, StowRsResource::Study],
-            request_media_types: vec![APPLICATION_DICOM],
+            request_media_types: vec![
+                APPLICATION_DICOM,
+                APPLICATION_DICOM_JSON,
+                APPLICATION_DICOM_XML,
+            ],
             response_media_types: vec![APPLICATION_DICOM_JSON],
             max_upload_size_bytes: None,
         });
@@ -199,12 +221,24 @@ impl DicomWebFeatureSet {
                 WadoRsResource::Study,
                 WadoRsResource::Series,
                 WadoRsResource::Instance,
+                WadoRsResource::BulkData,
+                WadoRsResource::PixelData,
+                WadoRsResource::Frames,
             ],
-            response_media_types: vec![APPLICATION_DICOM],
+            response_media_types: vec![APPLICATION_DICOM, APPLICATION_OCTET_STREAM],
             transfer_syntaxes: vec![TRANSFER_SYNTAX_ANY],
+            metadata: None,
             rendered: None,
             thumbnail: None,
         });
+    }
+
+    pub fn enable_wado_rs_metadata(&mut self) {
+        if let Some(wado_rs) = &mut self.wado_rs {
+            wado_rs.metadata = Some(WadoRsMetadataCapabilities {
+                response_media_types: vec![APPLICATION_DICOM_JSON, MULTIPART_RELATED_DICOM_XML],
+            });
+        }
     }
 
     pub fn enable_wado_uri(&mut self) {
@@ -224,7 +258,9 @@ impl DicomWebFeatureSet {
 
     pub fn enable_xml(&mut self) {
         if let Some(qido_rs) = &mut self.qido_rs {
-            qido_rs.response_media_types.push(APPLICATION_DICOM_XML);
+            qido_rs
+                .response_media_types
+                .push(MULTIPART_RELATED_DICOM_XML);
         }
     }
 
@@ -286,6 +322,7 @@ impl DicomWebFeatureSet {
                 .wado_rs
                 .as_ref()
                 .map_or(0, |capabilities| capabilities.resources.len())
+            + usize::from(self.wado_uri.is_some())
     }
 
     pub fn media_type_count(&self) -> usize {
@@ -297,6 +334,10 @@ impl DicomWebFeatureSet {
             })
             + self.wado_rs.as_ref().map_or(0, |capabilities| {
                 capabilities.response_media_types.len()
+                    + capabilities
+                        .metadata
+                        .as_ref()
+                        .map_or(0, |metadata| metadata.response_media_types.len())
                     + capabilities
                         .rendered
                         .as_ref()
@@ -402,6 +443,20 @@ fn study_instance_resource(features: &DicomWebFeatureSet) -> WadLResource {
             resource: vec![series_instance_resource(features)],
         });
     }
+    if let Some(metadata) = features
+        .wado_rs
+        .as_ref()
+        .and_then(|wado_rs| wado_rs.metadata.as_ref())
+    {
+        child_resources.push(metadata_resource("RetrieveStudyMetadata", metadata));
+    }
+    if let Some(wado_rs) = &features.wado_rs {
+        child_resources.push(octet_stream_resource(
+            "pixeldata",
+            "RetrieveStudyPixelData",
+            wado_rs,
+        ));
+    }
 
     WadLResource {
         path: "{StudyInstance}",
@@ -416,8 +471,28 @@ fn series_instance_resource(features: &DicomWebFeatureSet) -> WadLResource {
         child_resources.push(WadLResource {
             path: "instances",
             method: vec![qido_method("SearchForStudySeriesInstances", qido_rs)],
-            resource: Vec::new(),
+            resource: instance_resources(features),
         });
+    } else if features.wado_rs.is_some() {
+        child_resources.push(WadLResource {
+            path: "instances",
+            method: Vec::new(),
+            resource: instance_resources(features),
+        });
+    }
+    if let Some(metadata) = features
+        .wado_rs
+        .as_ref()
+        .and_then(|wado_rs| wado_rs.metadata.as_ref())
+    {
+        child_resources.push(metadata_resource("RetrieveSeriesMetadata", metadata));
+    }
+    if let Some(wado_rs) = &features.wado_rs {
+        child_resources.push(octet_stream_resource(
+            "pixeldata",
+            "RetrieveSeriesPixelData",
+            wado_rs,
+        ));
     }
 
     WadLResource {
@@ -428,6 +503,56 @@ fn series_instance_resource(features: &DicomWebFeatureSet) -> WadLResource {
             .map(|wado_rs| vec![wado_method("RetrieveSeries", wado_rs)])
             .unwrap_or_default(),
         resource: child_resources,
+    }
+}
+
+fn instance_resources(features: &DicomWebFeatureSet) -> Vec<WadLResource> {
+    let Some(wado_rs) = &features.wado_rs else {
+        return Vec::new();
+    };
+    let mut child_resources = Vec::new();
+    if let Some(metadata) = &wado_rs.metadata {
+        child_resources.push(metadata_resource("RetrieveInstanceMetadata", metadata));
+    }
+    child_resources.push(octet_stream_resource(
+        "bulkdata/{BulkDataPath}",
+        "RetrieveBulkData",
+        wado_rs,
+    ));
+    child_resources.push(octet_stream_resource(
+        "pixeldata",
+        "RetrieveInstancePixelData",
+        wado_rs,
+    ));
+    child_resources.push(octet_stream_resource(
+        "frames/{FrameList}",
+        "RetrieveFrames",
+        wado_rs,
+    ));
+    vec![WadLResource {
+        path: "{SOPInstance}",
+        method: vec![wado_method("RetrieveInstance", wado_rs)],
+        resource: child_resources,
+    }]
+}
+
+fn octet_stream_resource(
+    path: &'static str,
+    id: &'static str,
+    wado_rs: &WadoRsCapabilities,
+) -> WadLResource {
+    WadLResource {
+        path,
+        method: vec![wado_octet_stream_method(id, wado_rs)],
+        resource: Vec::new(),
+    }
+}
+
+fn metadata_resource(id: &'static str, metadata: &WadoRsMetadataCapabilities) -> WadLResource {
+    WadLResource {
+        path: "metadata",
+        method: vec![wado_metadata_method(id, metadata)],
+        resource: Vec::new(),
     }
 }
 
@@ -513,6 +638,50 @@ fn wado_method(id: &'static str, wado_rs: &WadoRsCapabilities) -> WadLMethod {
         response: vec![WadLResponse {
             status: "200",
             representation: wado_rs
+                .response_media_types
+                .iter()
+                .copied()
+                .map(representation)
+                .collect(),
+        }],
+    }
+}
+
+fn wado_octet_stream_method(id: &'static str, wado_rs: &WadoRsCapabilities) -> WadLMethod {
+    WadLMethod {
+        name: "GET",
+        id,
+        request: Some(WadLRequest {
+            param: wado_rs
+                .transfer_syntaxes
+                .iter()
+                .copied()
+                .map(|transfer_syntax| WadLParam {
+                    name: "transfer-syntax",
+                    style: "plain",
+                    default_value: Some(transfer_syntax),
+                })
+                .collect(),
+            representation: Vec::new(),
+        }),
+        response: vec![WadLResponse {
+            status: "200",
+            representation: vec![representation(APPLICATION_OCTET_STREAM)],
+        }],
+    }
+}
+
+fn wado_metadata_method(id: &'static str, metadata: &WadoRsMetadataCapabilities) -> WadLMethod {
+    WadLMethod {
+        name: "GET",
+        id,
+        request: Some(WadLRequest {
+            param: Vec::new(),
+            representation: Vec::new(),
+        }),
+        response: vec![WadLResponse {
+            status: "200",
+            representation: metadata
                 .response_media_types
                 .iter()
                 .copied()

@@ -50,6 +50,9 @@ impl FrameList {
             .split(',')
             .map(str::trim)
             .map(|frame| {
+                if frame.is_empty() || !frame.bytes().all(|byte| byte.is_ascii_digit()) {
+                    return Err(DicomWebError::bad_request("invalid frame list"));
+                }
                 let frame = frame
                     .parse::<u32>()
                     .map_err(|_| DicomWebError::bad_request("invalid frame list"))?;
@@ -61,6 +64,11 @@ impl FrameList {
             .collect::<Result<Vec<_>, _>>()?;
         if frames.is_empty() {
             return Err(DicomWebError::bad_request("frame list must not be empty"));
+        }
+        if frames.windows(2).any(|window| window[0] >= window[1]) {
+            return Err(DicomWebError::bad_request(
+                "frame list must be strictly ascending",
+            ));
         }
         Ok(Self(frames))
     }

@@ -1,7 +1,40 @@
+use std::fmt;
+use std::sync::Arc;
+
+use raccoon_service_ingest::IngestService;
+use raccoon_service_query::QueryService;
+use raccoon_service_retrieve::{MetadataRepository, RetrieveService};
+
 use crate::DicomWebFeatureSet;
+use crate::stow::StowRsProviderOptions;
 
 /// Shared Axum state for mounted DICOMweb endpoints.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct DicomWebState {
     pub features: DicomWebFeatureSet,
+    pub ingest: Option<Arc<dyn IngestService>>,
+    pub query: Option<Arc<dyn QueryService>>,
+    pub retrieve: Option<Arc<dyn RetrieveService>>,
+    pub metadata: Option<Arc<dyn MetadataRepository>>,
+    pub stow: Option<StowRsProviderOptions>,
+}
+
+impl fmt::Debug for DicomWebState {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DicomWebState")
+            .field("features", &self.features)
+            .field("ingest", &self.ingest.as_ref().map(|_| "IngestService"))
+            .field("query", &self.query.as_ref().map(|_| "QueryService"))
+            .field(
+                "retrieve",
+                &self.retrieve.as_ref().map(|_| "RetrieveService"),
+            )
+            .field(
+                "metadata",
+                &self.metadata.as_ref().map(|_| "MetadataRepository"),
+            )
+            .field("stow", &self.stow)
+            .finish()
+    }
 }
