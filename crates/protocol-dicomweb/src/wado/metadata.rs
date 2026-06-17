@@ -5,6 +5,7 @@ use raccoon_service_retrieve::{InstanceMetadata, RetrieveScope};
 use serde_json::{Value, json};
 use tracing::Span;
 
+use crate::instrumentation::record_error;
 use crate::media::{self, MediaType};
 use crate::{BulkDataPath, DicomWebError, DicomWebState, DicomWebUrlBase};
 
@@ -226,9 +227,4 @@ fn bulk_data_uri(
     } else {
         bulk_path.as_path().to_string()
     }
-}
-
-fn record_error(error: DicomWebError) -> DicomWebError {
-    Span::current().record("error.type", error.http_error_class());
-    error
 }

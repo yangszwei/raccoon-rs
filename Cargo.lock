@@ -2009,6 +2009,7 @@ dependencies = [
  "tonic-health",
  "tower",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

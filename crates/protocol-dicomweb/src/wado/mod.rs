@@ -13,6 +13,5 @@ pub use render::{
     RendererBackend, RetrieveRenderService, WadoRenderOptions,
 };
 pub(crate) use retrieve::{
-    collect_instances, record_native_transfer_syntax, record_scope, single_instance_response,
-    validate_transfer_syntaxes,
+    collect_instances, record_scope, retrieve_result, single_instance_response,
 };

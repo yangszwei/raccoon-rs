@@ -8,14 +8,12 @@ use raccoon_contract_dicom::TransferSyntaxUid;
 use raccoon_service_retrieve::{RetrieveScope, RetrieveService};
 use tracing::Instrument;
 
+use crate::instrumentation::record_error;
 use crate::media::{self, MediaType, MediaTypeParams};
-use crate::wado::{
-    collect_instances, record_native_transfer_syntax, record_scope, single_instance_response,
-    validate_transfer_syntaxes,
-};
+use crate::wado::{record_scope, retrieve_result, single_instance_response};
 use crate::{
-    DicomWebError, DicomWebProvider, DicomWebRouteRegistry, DicomWebState, series_instance_uid,
-    sop_instance_uid, study_instance_uid, transfer_syntax_uid,
+    DicomWebError, DicomWebProvider, DicomWebRouteRegistry, DicomWebState, RouteTelemetry,
+    series_instance_uid, sop_instance_uid, study_instance_uid, transfer_syntax_uid,
 };
 
 /// WADO-URI provider for query-parameter based DICOM object retrieval.
@@ -33,7 +31,11 @@ impl DicomWebProvider for WadoUriProvider {
     fn register(&self, registry: &mut DicomWebRouteRegistry) {
         registry.feature_set_mut().enable_wado_uri();
         registry.state_mut().retrieve = Some(self.retrieve.clone());
-        registry.route("/wado", get(wado_uri));
+        registry.route(
+            "/wado",
+            get(wado_uri),
+            RouteTelemetry::new("WADO-URI", "object", "/wado"),
+        );
     }
 }
 
@@ -112,20 +114,18 @@ async fn object_response(
             "WADO-URI retrieve service is not registered".to_string(),
         ))
     })?;
-    let instances = collect_instances(service.as_ref(), scope)
+    let result = retrieve_result(service.as_ref(), scope)
         .await
         .map_err(record_error)?;
-    validate_transfer_syntaxes(&instances, requested_transfer_syntax.as_ref())
-        .map_err(record_error)?;
-    tracing::Span::current().record("dicomweb.retrieve.instance_count", instances.len());
-    record_native_transfer_syntax(&instances);
-    record_selected_media_type(instances.first().and_then(|instance| {
-        instance
-            .transfer_syntax_uid
+    tracing::Span::current().record("dicomweb.retrieve.instance_count", result.instance_count);
+    record_selected_media_type(
+        requested_transfer_syntax
             .as_ref()
-            .map(TransferSyntaxUid::as_str)
-    }));
-    single_instance_response(instances).map_err(record_error)
+            .map(TransferSyntaxUid::as_str),
+    );
+    single_instance_response(result, requested_transfer_syntax)
+        .await
+        .map_err(record_error)
 }
 
 fn parse_query(query: Option<&str>) -> Result<WadoUriQuery, DicomWebError> {
@@ -223,11 +223,9 @@ fn wado_uri_span(uri: &Uri) -> tracing::Span {
         dicomweb.selected_media_type = tracing::field::Empty,
         dicomweb.returned_transfer_syntax_uid = tracing::field::Empty,
         dicomweb.retrieve.instance_count = tracing::field::Empty,
+        http.response.status_code = tracing::field::Empty,
         error.type = tracing::field::Empty,
+        dicomweb.error_type = tracing::field::Empty,
+        error.message = tracing::field::Empty,
     )
-}
-
-fn record_error(error: DicomWebError) -> DicomWebError {
-    tracing::Span::current().record("error.type", error.http_error_class());
-    error
 }

@@ -6,6 +6,7 @@ use std::sync::Mutex;
 use axum::Router;
 use raccoon_platform_config::app::MonolithConfig;
 use raccoon_platform_runtime::{App, FatalError};
+use raccoon_protocol_dicomweb::log_dicomweb_requests;
 use raccoon_protocol_dimse::{DimseListener, ServiceClassRegistry};
 use raccoon_service_application_entity_registry::ApplicationEntityRegistry;
 use raccoon_service_sync::{SyncService, SyncWorkerId};
@@ -120,6 +121,7 @@ pub async fn build_monolith_app(
         &config.dcmtk,
     );
     let dicomweb_router = mount_base_path(&config.dicomweb.base_path, dicomweb_router);
+    let dicomweb_router = log_dicomweb_requests("dicomweb", dicomweb_router);
     let (dicomweb_local_addr, dicomweb_listener) =
         bind_http_listener(&config.app.name, &config.dicomweb.bind_address).await?;
 

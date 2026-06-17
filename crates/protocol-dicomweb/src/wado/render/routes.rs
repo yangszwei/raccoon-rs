@@ -11,36 +11,75 @@ use super::{
     RenderParams, RenderRequest, RenderedImage, render_error, validate_render_params,
     validate_thumbnail_params,
 };
+use crate::instrumentation::record_error;
 use crate::media::{self, MediaType, MediaTypeParams, SelectedRepresentation};
 use crate::wado::{record_scope, scope};
-use crate::{DicomWebError, DicomWebRouteRegistry, DicomWebState, FrameList};
+use crate::{DicomWebError, DicomWebRouteRegistry, DicomWebState, FrameList, RouteTelemetry};
 
 pub(crate) fn register(registry: &mut DicomWebRouteRegistry) {
-    registry.route("/studies/{study}/rendered", get(study_rendered));
-    registry.route("/studies/{study}/thumbnail", get(study_thumbnail));
+    registry.route(
+        "/studies/{study}/rendered",
+        get(study_rendered),
+        RouteTelemetry::new("WADO-RS", "rendered", "/studies/{study}/rendered"),
+    );
+    registry.route(
+        "/studies/{study}/thumbnail",
+        get(study_thumbnail),
+        RouteTelemetry::new("WADO-RS", "thumbnail", "/studies/{study}/thumbnail"),
+    );
     registry.route(
         "/studies/{study}/series/{series}/rendered",
         get(series_rendered),
+        RouteTelemetry::new(
+            "WADO-RS",
+            "rendered",
+            "/studies/{study}/series/{series}/rendered",
+        ),
     );
     registry.route(
         "/studies/{study}/series/{series}/thumbnail",
         get(series_thumbnail),
+        RouteTelemetry::new(
+            "WADO-RS",
+            "thumbnail",
+            "/studies/{study}/series/{series}/thumbnail",
+        ),
     );
     registry.route(
         "/studies/{study}/series/{series}/instances/{instance}/rendered",
         get(instance_rendered),
+        RouteTelemetry::new(
+            "WADO-RS",
+            "rendered",
+            "/studies/{study}/series/{series}/instances/{instance}/rendered",
+        ),
     );
     registry.route(
         "/studies/{study}/series/{series}/instances/{instance}/thumbnail",
         get(instance_thumbnail),
+        RouteTelemetry::new(
+            "WADO-RS",
+            "thumbnail",
+            "/studies/{study}/series/{series}/instances/{instance}/thumbnail",
+        ),
     );
     registry.route(
         "/studies/{study}/series/{series}/instances/{instance}/frames/{frames}/rendered",
         get(frames_rendered),
+        RouteTelemetry::new(
+            "WADO-RS",
+            "rendered",
+            "/studies/{study}/series/{series}/instances/{instance}/frames/{frames}/rendered",
+        ),
     );
     registry.route(
         "/studies/{study}/series/{series}/instances/{instance}/frames/{frames}/thumbnail",
         get(frames_thumbnail),
+        RouteTelemetry::new(
+            "WADO-RS",
+            "thumbnail",
+            "/studies/{study}/series/{series}/instances/{instance}/frames/{frames}/thumbnail",
+        ),
     );
 }
 
@@ -489,11 +528,9 @@ fn render_span(resource: &'static str, route: &'static str, uri: &Uri) -> tracin
         dicomweb.returned_part_count = tracing::field::Empty,
         dicomweb.renderer_backend = tracing::field::Empty,
         dicomweb.render_cache_result = tracing::field::Empty,
+        http.response.status_code = tracing::field::Empty,
         error.type = tracing::field::Empty,
+        dicomweb.error_type = tracing::field::Empty,
+        error.message = tracing::field::Empty,
     )
-}
-
-fn record_error(error: DicomWebError) -> DicomWebError {
-    tracing::Span::current().record("error.type", error.http_error_class());
-    error
 }

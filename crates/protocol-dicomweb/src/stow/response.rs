@@ -14,9 +14,7 @@ pub(crate) fn storage_response(
 ) -> Response {
     let status = storage_status(results, repository_status);
     record_counts(results);
-    if !status.is_success() {
-        tracing::Span::current().record("error.type", status.as_u16().to_string());
-    }
+    record_status(status);
     let body = axum::Json(storage_response_json(
         results,
         DicomWebUrlBase::from_request(headers, uri).as_ref(),
@@ -85,6 +83,25 @@ fn record_counts(results: &[IngestResult]) {
     span.record("dicomweb.object_count", results.len());
     span.record("dicomweb.successful_object_count", successful);
     span.record("dicomweb.failed_object_count", failed);
+}
+
+fn record_status(status: StatusCode) {
+    let span = tracing::Span::current();
+    span.record("http.response.status_code", status.as_u16());
+    if status.is_success() {
+        return;
+    }
+
+    let status_code = status.as_u16().to_string();
+    let reason = status.canonical_reason().unwrap_or("HTTP error");
+    span.record("error.type", status_code.as_str());
+    span.record("dicomweb.error_type", status_code.as_str());
+    span.record("error.message", reason);
+    if status.is_server_error() {
+        tracing::error!("dicomweb store completed with failures");
+    } else {
+        tracing::warn!("dicomweb store completed with failures");
+    }
 }
 
 fn storage_response_json(results: &[IngestResult], url_base: Option<&DicomWebUrlBase>) -> Value {
@@ -240,7 +257,10 @@ mod tests {
             dicomweb.object_count = tracing::field::Empty,
             dicomweb.successful_object_count = tracing::field::Empty,
             dicomweb.failed_object_count = tracing::field::Empty,
+            http.response.status_code = tracing::field::Empty,
             error.type = tracing::field::Empty,
+            dicomweb.error_type = tracing::field::Empty,
+            error.message = tracing::field::Empty,
         );
         let _entered = span.enter();
         let headers = HeaderMap::new();
@@ -268,7 +288,16 @@ mod tests {
             records.contains("dicomweb.failed_object_count=0"),
             "{records}"
         );
+        assert!(
+            records.contains("http.response.status_code=500"),
+            "{records}"
+        );
         assert!(records.contains("error.type=500"), "{records}");
+        assert!(records.contains("dicomweb.error_type=500"), "{records}");
+        assert!(
+            records.contains("error.message=Internal Server Error"),
+            "{records}"
+        );
         assert!(!records.contains("DICOMDATA"));
     }
 

@@ -1,5 +1,7 @@
 use tracing::Span;
 
+use crate::DicomWebError;
+
 /// Standard DICOMweb span fields owned by this protocol crate.
 #[derive(Debug, Clone, Default, Eq, PartialEq)]
 pub struct InstrumentationFields {
@@ -19,6 +21,27 @@ pub struct DicomUidFields {
     pub study_instance_uid: Option<String>,
     pub series_instance_uid: Option<String>,
     pub sop_instance_uid: Option<String>,
+}
+
+pub(crate) fn record_error(error: DicomWebError) -> DicomWebError {
+    let status = error.status_code();
+    let http_error_class = error.http_error_class();
+    let error_type = error.error_type();
+    let message = error.to_string();
+    let span = Span::current();
+
+    span.record("http.response.status_code", status.as_u16());
+    span.record("error.type", http_error_class);
+    span.record("dicomweb.error_type", error_type);
+    span.record("error.message", message.as_str());
+
+    if status.is_server_error() {
+        tracing::error!("dicomweb request failed");
+    } else {
+        tracing::warn!("dicomweb request rejected");
+    }
+
+    error
 }
 
 impl InstrumentationFields {

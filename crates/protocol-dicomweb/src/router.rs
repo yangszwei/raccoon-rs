@@ -1,6 +1,9 @@
-use axum::extract::State;
+use std::time::Instant;
+
+use axum::extract::{Request, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, Uri, header};
-use axum::response::IntoResponse;
+use axum::middleware::{Next, from_fn};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{MethodRouter, options};
 use axum::{Json, Router};
 use tracing::Instrument;
@@ -47,6 +50,27 @@ pub struct DicomWebRouteRegistry {
     state: DicomWebState,
 }
 
+/// DICOMweb route metadata used for protocol-oriented completion events.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub struct RouteTelemetry {
+    pub service: &'static str,
+    pub resource: &'static str,
+    pub route: &'static str,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DicomWebServiceName(&'static str);
+
+impl RouteTelemetry {
+    pub const fn new(service: &'static str, resource: &'static str, route: &'static str) -> Self {
+        Self {
+            service,
+            resource,
+            route,
+        }
+    }
+}
+
 impl Default for DicomWebRouteRegistry {
     fn default() -> Self {
         Self {
@@ -77,7 +101,15 @@ impl DicomWebRouteRegistry {
         &mut self.state
     }
 
-    pub fn route(&mut self, path: &'static str, method_router: MethodRouter<DicomWebState>) {
+    pub fn route(
+        &mut self,
+        path: &'static str,
+        method_router: MethodRouter<DicomWebState>,
+        telemetry: RouteTelemetry,
+    ) {
+        let method_router = method_router.layer(from_fn(move |request, next| {
+            record_dicomweb_completion(request, next, telemetry)
+        }));
         self.routes = std::mem::take(&mut self.routes).route(path, method_router);
     }
 
@@ -87,10 +119,65 @@ impl DicomWebRouteRegistry {
 
     pub fn into_router(self) -> Router {
         Router::new()
-            .route("/", options(options_root))
+            .route(
+                "/",
+                options(options_root).layer(from_fn(|request, next| {
+                    record_dicomweb_completion(
+                        request,
+                        next,
+                        RouteTelemetry::new("capabilities", "capabilities", "OPTIONS /"),
+                    )
+                })),
+            )
             .merge(self.routes)
             .with_state(self.state)
     }
+}
+
+/// Add DICOMweb service identity for protocol-owned request completion logs.
+pub fn log_dicomweb_requests(service_name: &'static str, router: Router) -> Router {
+    router.layer(from_fn(
+        move |mut request: Request, next: Next| async move {
+            request
+                .extensions_mut()
+                .insert(DicomWebServiceName(service_name));
+            next.run(request).await
+        },
+    ))
+}
+
+async fn record_dicomweb_completion(
+    request: Request,
+    next: Next,
+    telemetry: RouteTelemetry,
+) -> Response {
+    let service_name = request
+        .extensions()
+        .get::<DicomWebServiceName>()
+        .map(|name| name.0)
+        .unwrap_or("dicomweb");
+    let method = request.method().clone();
+    let path = request.uri().path().to_string();
+    let started_at = Instant::now();
+
+    let response = next.run(request).await;
+    let status = response.status();
+    let elapsed_ms = u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+
+    tracing::info!(
+        service.name = service_name,
+        dicomweb.service = telemetry.service,
+        dicomweb.resource = telemetry.resource,
+        dicomweb.transport = "HTTP",
+        http.request.method = %method,
+        http.route = telemetry.route,
+        url.path = path,
+        http.response.status_code = status.as_u16(),
+        dicomweb.duration_ms = elapsed_ms,
+        "DICOMweb response sent"
+    );
+
+    response
 }
 
 async fn options_root(
@@ -146,12 +233,24 @@ fn header_str<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
     use axum::body::to_bytes;
     use axum::http::{Method, Request, StatusCode};
+    use axum::routing::get;
     use serde_json::{Value, json};
     use tower::ServiceExt;
+    use tracing::Metadata;
+    use tracing::field::{Field, Visit};
+    use tracing::subscriber::Interest;
+    use tracing_subscriber::Layer;
+    use tracing_subscriber::layer::{Context, SubscriberExt};
+    use tracing_subscriber::registry::LookupSpan;
 
-    use super::{DicomWebProvider, DicomWebRouteRegistry, DicomWebRouter};
+    use super::{
+        DicomWebProvider, DicomWebRouteRegistry, DicomWebRouter, RouteTelemetry,
+        log_dicomweb_requests,
+    };
 
     struct QidoTestProvider;
 
@@ -188,6 +287,18 @@ mod tests {
             registry.feature_set_mut().enable_rendered();
             registry.feature_set_mut().enable_thumbnail();
             registry.feature_set_mut().enable_wado_uri();
+        }
+    }
+
+    struct TelemetryTestProvider;
+
+    impl DicomWebProvider for TelemetryTestProvider {
+        fn register(&self, registry: &mut DicomWebRouteRegistry) {
+            registry.route(
+                "/studies",
+                get(|| async { (StatusCode::ACCEPTED, "ok") }),
+                RouteTelemetry::new("QIDO-RS", "studies", "/studies"),
+            );
         }
     }
 
@@ -410,6 +521,55 @@ mod tests {
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn route_completion_records_dicomweb_event() {
+        let records = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(CaptureLayer {
+            records: records.clone(),
+        });
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let router = log_dicomweb_requests(
+            "dicomweb-gateway",
+            DicomWebRouter::new()
+                .register(TelemetryTestProvider)
+                .into_router(),
+        );
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/studies?PatientName=SMITH")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+
+        let records = records.lock().expect("records lock").join("\n");
+        assert!(
+            records.contains("message=DICOMweb response sent"),
+            "{records}"
+        );
+        assert!(
+            records.contains("service.name=dicomweb-gateway"),
+            "{records}"
+        );
+        assert!(records.contains("dicomweb.service=QIDO-RS"), "{records}");
+        assert!(records.contains("dicomweb.resource=studies"), "{records}");
+        assert!(records.contains("dicomweb.transport=HTTP"), "{records}");
+        assert!(records.contains("http.request.method=GET"), "{records}");
+        assert!(records.contains("http.route=/studies"), "{records}");
+        assert!(records.contains("url.path=/studies"), "{records}");
+        assert!(
+            records.contains("http.response.status_code=202"),
+            "{records}"
+        );
+        assert!(records.contains("dicomweb.duration_ms="), "{records}");
+    }
+
     async fn options_root_payload(builder: DicomWebRouter) -> Value {
         let response = options_root_response(builder.into_router()).await;
         assert_eq!(response.status(), StatusCode::OK);
@@ -470,5 +630,51 @@ mod tests {
             text.contains(context) && text.contains(needle),
             "{text} missing {needle}"
         );
+    }
+
+    struct CaptureLayer {
+        records: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl<S> Layer<S> for CaptureLayer
+    where
+        S: tracing::Subscriber,
+        S: for<'lookup> LookupSpan<'lookup>,
+    {
+        fn register_callsite(&self, _metadata: &'static Metadata<'static>) -> Interest {
+            Interest::always()
+        }
+
+        fn enabled(&self, _metadata: &Metadata<'_>, _ctx: Context<'_, S>) -> bool {
+            true
+        }
+
+        fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+            let mut visitor = CaptureVisitor::default();
+            event.record(&mut visitor);
+            self.records
+                .lock()
+                .expect("records lock")
+                .extend(visitor.records);
+        }
+    }
+
+    #[derive(Default)]
+    struct CaptureVisitor {
+        records: Vec<String>,
+    }
+
+    impl Visit for CaptureVisitor {
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            self.records.push(format!("{}={value:?}", field.name()));
+        }
+
+        fn record_u64(&mut self, field: &Field, value: u64) {
+            self.records.push(format!("{}={value}", field.name()));
+        }
+
+        fn record_str(&mut self, field: &Field, value: &str) {
+            self.records.push(format!("{}={value}", field.name()));
+        }
     }
 }

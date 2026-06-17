@@ -17,6 +17,7 @@ use raccoon_service_ingest::{
 use serde_json::{Value, json};
 
 use super::response;
+use crate::instrumentation::record_error;
 use crate::media::{APPLICATION_DICOM_JSON, APPLICATION_DICOM_XML, APPLICATION_OCTET_STREAM};
 use crate::{DicomWebError, DicomWebState};
 
@@ -590,9 +591,4 @@ impl SpanRecord {
     fn part_count(count: u64) {
         tracing::Span::current().record("dicomweb.store.part_count", count);
     }
-}
-
-fn record_error(error: DicomWebError) -> DicomWebError {
-    tracing::Span::current().record("error.type", error.http_error_class());
-    error
 }

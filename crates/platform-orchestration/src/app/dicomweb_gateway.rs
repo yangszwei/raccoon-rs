@@ -8,6 +8,7 @@ use axum::Router;
 use raccoon_platform_config::app::DicomWebGatewayConfig;
 use raccoon_platform_config::component::grpc::GrpcClientConfig;
 use raccoon_platform_runtime::{App, FatalError};
+use raccoon_protocol_dicomweb::log_dicomweb_requests;
 use raccoon_service_ingest::{
     GrpcIngestTransportClient, IngestService, IngestTransportServiceClient,
 };
@@ -57,6 +58,7 @@ pub async fn build_dicomweb_gateway_app(
         &config.dcmtk,
     );
     let router = mount_base_path(&config.dicomweb.base_path, router);
+    let router = log_dicomweb_requests("dicomweb-gateway", router);
     let (local_addr, listener) =
         bind_http_listener("dicomweb-gateway", &config.dicomweb.bind_address).await?;
 

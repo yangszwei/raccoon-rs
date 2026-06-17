@@ -6,40 +6,92 @@ use serde::Deserialize;
 use tracing::Instrument;
 
 use super::{bulkdata, metadata, retrieve, scope};
-use crate::{DicomWebError, DicomWebRouteRegistry, DicomWebState, FrameList};
+use crate::instrumentation::record_error;
+use crate::{DicomWebError, DicomWebRouteRegistry, DicomWebState, FrameList, RouteTelemetry};
 
 pub(crate) fn register(registry: &mut DicomWebRouteRegistry) {
-    registry.route("/studies/{study}", get(retrieve_study));
-    registry.route("/studies/{study}/metadata", get(study_metadata));
-    registry.route("/studies/{study}/pixeldata", get(study_pixel_data));
-    registry.route("/studies/{study}/series/{series}", get(retrieve_series));
+    registry.route(
+        "/studies/{study}",
+        get(retrieve_study),
+        RouteTelemetry::new("WADO-RS", "studies", "/studies/{study}"),
+    );
+    registry.route(
+        "/studies/{study}/metadata",
+        get(study_metadata),
+        RouteTelemetry::new("WADO-RS", "metadata", "/studies/{study}/metadata"),
+    );
+    registry.route(
+        "/studies/{study}/pixeldata",
+        get(study_pixel_data),
+        RouteTelemetry::new("WADO-RS", "pixeldata", "/studies/{study}/pixeldata"),
+    );
+    registry.route(
+        "/studies/{study}/series/{series}",
+        get(retrieve_series),
+        RouteTelemetry::new("WADO-RS", "series", "/studies/{study}/series/{series}"),
+    );
     registry.route(
         "/studies/{study}/series/{series}/metadata",
         get(series_metadata),
+        RouteTelemetry::new(
+            "WADO-RS",
+            "metadata",
+            "/studies/{study}/series/{series}/metadata",
+        ),
     );
     registry.route(
         "/studies/{study}/series/{series}/pixeldata",
         get(series_pixel_data),
+        RouteTelemetry::new(
+            "WADO-RS",
+            "pixeldata",
+            "/studies/{study}/series/{series}/pixeldata",
+        ),
     );
     registry.route(
         "/studies/{study}/series/{series}/instances/{instance}",
         get(retrieve_instance),
+        RouteTelemetry::new(
+            "WADO-RS",
+            "instances",
+            "/studies/{study}/series/{series}/instances/{instance}",
+        ),
     );
     registry.route(
         "/studies/{study}/series/{series}/instances/{instance}/metadata",
         get(instance_metadata),
+        RouteTelemetry::new(
+            "WADO-RS",
+            "metadata",
+            "/studies/{study}/series/{series}/instances/{instance}/metadata",
+        ),
     );
     registry.route(
         "/studies/{study}/series/{series}/instances/{instance}/bulkdata/{*path}",
         get(instance_bulk_data),
+        RouteTelemetry::new(
+            "WADO-RS",
+            "bulkdata",
+            "/studies/{study}/series/{series}/instances/{instance}/bulkdata/{path}",
+        ),
     );
     registry.route(
         "/studies/{study}/series/{series}/instances/{instance}/pixeldata",
         get(instance_pixel_data),
+        RouteTelemetry::new(
+            "WADO-RS",
+            "pixeldata",
+            "/studies/{study}/series/{series}/instances/{instance}/pixeldata",
+        ),
     );
     registry.route(
         "/studies/{study}/series/{series}/instances/{instance}/frames/{frames}",
         get(instance_frames),
+        RouteTelemetry::new(
+            "WADO-RS",
+            "frames",
+            "/studies/{study}/series/{series}/instances/{instance}/frames/{frames}",
+        ),
     );
 }
 
@@ -296,11 +348,9 @@ fn wado_span(resource: &'static str, route: &'static str, uri: &Uri) -> tracing:
         dicomweb.metadata.bulk_data_uri_count = tracing::field::Empty,
         dicomweb.requested_frame_count = tracing::field::Empty,
         dicomweb.returned_part_count = tracing::field::Empty,
+        http.response.status_code = tracing::field::Empty,
         error.type = tracing::field::Empty,
+        dicomweb.error_type = tracing::field::Empty,
+        error.message = tracing::field::Empty,
     )
-}
-
-fn record_error(error: DicomWebError) -> DicomWebError {
-    tracing::Span::current().record("error.type", error.http_error_class());
-    error
 }

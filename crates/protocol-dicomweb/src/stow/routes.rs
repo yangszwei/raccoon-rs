@@ -13,14 +13,23 @@ use serde::Deserialize;
 use tracing::Instrument;
 
 use super::{metadata, response, spool};
+use crate::instrumentation::record_error;
 use crate::{
     APPLICATION_DICOM, APPLICATION_DICOM_JSON, APPLICATION_DICOM_XML, DicomWebError,
-    DicomWebRouteRegistry, DicomWebState, MULTIPART_RELATED,
+    DicomWebRouteRegistry, DicomWebState, MULTIPART_RELATED, RouteTelemetry,
 };
 
 pub(crate) fn register(registry: &mut DicomWebRouteRegistry) {
-    registry.route("/studies", post(store_instances));
-    registry.route("/studies/{study}", post(store_study_instances));
+    registry.route(
+        "/studies",
+        post(store_instances),
+        RouteTelemetry::new("STOW-RS", "studies", "/studies"),
+    );
+    registry.route(
+        "/studies/{study}",
+        post(store_study_instances),
+        RouteTelemetry::new("STOW-RS", "studies", "/studies/{study}"),
+    );
 }
 
 #[derive(Debug, Deserialize)]
@@ -279,13 +288,11 @@ fn stow_span(route: &'static str, path: &str) -> tracing::Span {
         dicomweb.successful_object_count = tracing::field::Empty,
         dicomweb.failed_object_count = tracing::field::Empty,
         dicomweb.spool_bytes = tracing::field::Empty,
+        http.response.status_code = tracing::field::Empty,
         error.type = tracing::field::Empty,
+        dicomweb.error_type = tracing::field::Empty,
+        error.message = tracing::field::Empty,
     )
-}
-
-fn record_error(error: DicomWebError) -> DicomWebError {
-    tracing::Span::current().record("error.type", error.http_error_class());
-    error
 }
 
 #[cfg(test)]

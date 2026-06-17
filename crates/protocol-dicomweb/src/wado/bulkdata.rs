@@ -9,12 +9,14 @@ use dicom_dictionary_std::{tags, uids};
 use dicom_object::{
     DefaultDicomObject, FileMetaTableBuilder, InMemDicomObject, collector::DicomCollector,
 };
+use futures_util::StreamExt;
 use raccoon_contract_dicom::DicomInstanceIdentity;
 use raccoon_contract_object_store::Bytes;
 use raccoon_service_retrieve::RetrieveScope;
 use tracing::Span;
 
-use super::retrieve::{CollectedInstance, collect_instances};
+use super::retrieve::{CollectedInstance, collect_instance, retrieve_result};
+use crate::instrumentation::record_error;
 use crate::media::{
     self, AvailableRepresentation, MediaType, MediaTypeParams, SelectedRepresentation,
 };
@@ -133,13 +135,20 @@ async fn collect_bulk_parts(
             "WADO-RS retrieve service is not registered".to_string(),
         ))
     })?;
-    let instances = collect_instances(service.as_ref(), scope)
+    let result = retrieve_result(service.as_ref(), scope)
         .await
         .map_err(record_error)?;
 
     let mut parts = Vec::new();
-    for instance in &instances {
-        parts.extend(extract(instance).map_err(record_error)?);
+    let mut stream = result.stream;
+    while let Some(item) = stream.next().await {
+        let instance = item.map_err(|error| {
+            record_error(DicomWebError::Internal(format!(
+                "retrieve stream failed: {error}"
+            )))
+        })?;
+        let instance = collect_instance(instance).await.map_err(record_error)?;
+        parts.extend(extract(&instance).map_err(record_error)?);
     }
     if parts.is_empty() {
         return Err(record_error(DicomWebError::NotFound(
@@ -383,9 +392,4 @@ fn required_usize(object: &DefaultDicomObject, tag: Tag) -> Result<usize, DicomW
 
 fn record_selected(selected: &SelectedRepresentation) {
     Span::current().record("dicomweb.selected_media_type", selected.content_type());
-}
-
-fn record_error(error: DicomWebError) -> DicomWebError {
-    Span::current().record("error.type", error.http_error_class());
-    error
 }

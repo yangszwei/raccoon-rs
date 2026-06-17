@@ -124,15 +124,19 @@ fn normalized_origin(headers: &HeaderMap, uri: &Uri) -> Option<(String, String)>
         return Some((scheme.to_string(), authority.as_str().to_string()));
     }
 
-    let authority = headers
-        .get(header::HOST)
-        .and_then(|value| value.to_str().ok())?
+    let authority = header_str(headers, "x-forwarded-host")
+        .or_else(|| header_str(headers, header::HOST.as_str()))?
         .trim()
         .to_string();
     if authority.is_empty() {
         return None;
     }
-    Some(("http".to_string(), authority))
+    let scheme = header_str(headers, "x-forwarded-proto").unwrap_or("http");
+    Some((scheme.to_string(), authority))
+}
+
+fn header_str<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
+    headers.get(name).and_then(|value| value.to_str().ok())
 }
 
 fn dicomweb_base_path(path: &str) -> String {
@@ -227,7 +231,7 @@ mod tests {
     }
 
     #[test]
-    fn ignores_raw_forwarded_headers_without_normalized_request_url() {
+    fn uses_forwarded_origin_headers() {
         let mut headers = HeaderMap::new();
         headers.insert(header::HOST, HeaderValue::from_static("internal:8080"));
         headers.insert("x-forwarded-proto", HeaderValue::from_static("https"));
@@ -239,7 +243,7 @@ mod tests {
 
         let base = DicomWebUrlBase::from_request(&headers, &uri).expect("base URL");
 
-        assert_eq!(base.origin(), "http://internal:8080");
+        assert_eq!(base.origin(), "https://public.example.test");
     }
 
     #[test]

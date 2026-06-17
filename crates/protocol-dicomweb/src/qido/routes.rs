@@ -7,21 +7,47 @@ use raccoon_service_query::{DicomQuery, Predicate, QueryError, QueryScope};
 use serde::Deserialize;
 use tracing::Instrument;
 
+use crate::instrumentation::record_error;
 use crate::media::{self, DicomJsonOrXmlMultipart};
 use crate::qido::params::{QidoQueryParams, uid_predicate};
 use crate::qido::response::{RetrieveUrlLevel, query_page_json};
-use crate::{DicomWebError, DicomWebRouteRegistry, DicomWebState, DicomWebUrlBase};
+use crate::{DicomWebError, DicomWebRouteRegistry, DicomWebState, DicomWebUrlBase, RouteTelemetry};
 
 pub(crate) fn register(registry: &mut DicomWebRouteRegistry) {
-    registry.route("/studies", get(search_studies));
-    registry.route("/studies/{study}/series", get(search_study_series));
-    registry.route("/studies/{study}/instances", get(search_study_instances));
+    registry.route(
+        "/studies",
+        get(search_studies),
+        RouteTelemetry::new("QIDO-RS", "studies", "/studies"),
+    );
+    registry.route(
+        "/studies/{study}/series",
+        get(search_study_series),
+        RouteTelemetry::new("QIDO-RS", "study_series", "/studies/{study}/series"),
+    );
+    registry.route(
+        "/studies/{study}/instances",
+        get(search_study_instances),
+        RouteTelemetry::new("QIDO-RS", "study_instances", "/studies/{study}/instances"),
+    );
     registry.route(
         "/studies/{study}/series/{series}/instances",
         get(search_series_instances),
+        RouteTelemetry::new(
+            "QIDO-RS",
+            "series_instances",
+            "/studies/{study}/series/{series}/instances",
+        ),
     );
-    registry.route("/series", get(search_series));
-    registry.route("/instances", get(search_instances));
+    registry.route(
+        "/series",
+        get(search_series),
+        RouteTelemetry::new("QIDO-RS", "series", "/series"),
+    );
+    registry.route(
+        "/instances",
+        get(search_instances),
+        RouteTelemetry::new("QIDO-RS", "instances", "/instances"),
+    );
 }
 
 #[derive(Debug, Deserialize)]
@@ -330,7 +356,10 @@ fn qido_span(resource: &'static str, route: &'static str, path: &str) -> tracing
         dicomweb.query.fuzzy_matching = tracing::field::Empty,
         dicom.timezone_offset = tracing::field::Empty,
         dicomweb.selected_media_type = tracing::field::Empty,
+        http.response.status_code = tracing::field::Empty,
         error.type = tracing::field::Empty,
+        dicomweb.error_type = tracing::field::Empty,
+        error.message = tracing::field::Empty,
     )
 }
 
@@ -376,9 +405,4 @@ fn query_error(error: QueryError) -> DicomWebError {
         QueryError::InvalidQuery(message) => record_error(DicomWebError::bad_request(message)),
         QueryError::Repository(error) => record_error(DicomWebError::Internal(error.to_string())),
     }
-}
-
-fn record_error(error: DicomWebError) -> DicomWebError {
-    tracing::Span::current().record("error.type", error.http_error_class());
-    error
 }

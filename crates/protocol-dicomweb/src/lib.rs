@@ -24,7 +24,9 @@ pub use media::{
     negotiate_dicom_json_or_xml_multipart, negotiate_response, parse_accept,
 };
 pub use qido::QidoRsProvider;
-pub use router::{DicomWebProvider, DicomWebRouteRegistry, DicomWebRouter};
+pub use router::{
+    DicomWebProvider, DicomWebRouteRegistry, DicomWebRouter, RouteTelemetry, log_dicomweb_requests,
+};
 pub use state::DicomWebState;
 pub use status::DicomWebStatus;
 pub use stow::{StowRsProvider, StowRsProviderOptions};
