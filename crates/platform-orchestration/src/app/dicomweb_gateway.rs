@@ -92,9 +92,8 @@ impl App for DicomWebGatewayApp {
         let router = self.router.clone();
 
         let server = axum::serve(listener, router).with_graceful_shutdown(async move {
-            info!("DICOMweb gateway graceful shutdown started");
             shutdown.cancelled().await;
-            info!("DICOMweb gateway graceful shutdown finished");
+            info!("DICOMweb gateway graceful shutdown started");
         });
         start_http_server("dicomweb-gateway", server, task_tracker, fatal_tx);
     }

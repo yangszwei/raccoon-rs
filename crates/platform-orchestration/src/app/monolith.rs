@@ -188,9 +188,8 @@ fn start_dicomweb_server(
     };
 
     let server = axum::serve(listener, router).with_graceful_shutdown(async move {
-        info!("DICOMweb HTTP server graceful shutdown started");
         shutdown.cancelled().await;
-        info!("DICOMweb HTTP server graceful shutdown finished");
+        info!("DICOMweb HTTP server graceful shutdown started");
     });
     start_http_server("dicomweb", server, task_tracker, fatal_tx);
 }
