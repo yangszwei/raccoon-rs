@@ -1,4 +1,5 @@
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use axum::Router;
@@ -13,7 +14,7 @@ use raccoon_contract_dicom::{
     DicomInstanceIdentity, SeriesInstanceUid, SopClassUid, SopInstanceUid, StudyInstanceUid,
     TransferSyntaxUid,
 };
-use raccoon_contract_object_store::ByteStream;
+use raccoon_contract_object_store::{ByteStream, Bytes};
 use raccoon_protocol_dicomweb::{
     DicomWebRouter, RenderCacheConfig, RenderedWadoRsProvider, WadoRenderOptions, WadoRsProvider,
     WadoUriProvider,
@@ -56,6 +57,8 @@ struct FakeMetadata {
     rows: Vec<InstanceMetadata>,
 }
 
+struct BackpressuredRetrieve;
+
 #[async_trait]
 impl RetrieveService for FakeRetrieve {
     async fn retrieve(&self, request: RetrieveRequest) -> Result<RetrieveResult, RetrieveError> {
@@ -78,6 +81,54 @@ impl RetrieveService for FakeRetrieve {
             instance_count: instances.len(),
             total_content_length: None,
             stream: Box::pin(stream::iter(instances)),
+        })
+    }
+}
+
+#[async_trait]
+impl RetrieveService for BackpressuredRetrieve {
+    async fn retrieve(&self, _request: RetrieveRequest) -> Result<RetrieveResult, RetrieveError> {
+        let (instance_tx, mut instance_rx) =
+            tokio::sync::mpsc::channel::<Result<RetrievedInstance, RetrieveError>>(1);
+
+        tokio::spawn(async move {
+            for (sop_instance_uid, chunks) in [
+                ("1.2.3.4.5", vec!["ONE-", "BODY"]),
+                ("1.2.3.4.6", vec!["TWO-", "BODY"]),
+            ] {
+                let (body_tx, mut body_rx) =
+                    tokio::sync::mpsc::channel::<raccoon_contract_object_store::Result<Bytes>>(1);
+                let body =
+                    ByteStream::new(stream::poll_fn(move |context| body_rx.poll_recv(context)));
+                let instance = RetrievedInstance {
+                    identity: identity(sop_instance_uid),
+                    transfer_syntax_uid: Some(TransferSyntaxUid::new(NATIVE_TS).unwrap()),
+                    content_length: chunks.iter().map(|chunk| chunk.len() as u64).sum(),
+                    body,
+                };
+
+                if instance_tx.send(Ok(instance)).await.is_err() {
+                    return;
+                }
+
+                for chunk in chunks {
+                    if body_tx
+                        .send(Ok(Bytes::from(chunk.as_bytes().to_vec())))
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+            }
+        });
+
+        Ok(RetrieveResult {
+            instance_count: 2,
+            total_content_length: None,
+            stream: Box::pin(stream::poll_fn(move |context| {
+                instance_rx.poll_recv(context)
+            })),
         })
     }
 }
@@ -153,6 +204,26 @@ async fn wado_retrieve_wildcard_accept_selects_multipart_dicom() {
         content_type.contains("type=\"application/dicom\""),
         "{content_type}"
     );
+}
+
+#[tokio::test]
+async fn wado_multipart_retrieve_drains_body_before_next_instance() {
+    let response = tokio::time::timeout(
+        Duration::from_secs(1),
+        request(
+            router_service(Arc::new(BackpressuredRetrieve)),
+            "/studies/1.2.3",
+            "multipart/related; type=\"application/dicom\"",
+        ),
+    )
+    .await
+    .expect("multipart retrieve should not wait for a later instance before draining body");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response_text(response).await;
+    assert!(body.contains("ONE-BODY"));
+    assert!(body.contains("TWO-BODY"));
+    assert_eq!(body.matches("Content-Type: application/dicom").count(), 2);
 }
 
 #[tokio::test]
@@ -1757,6 +1828,10 @@ async fn wado_capabilities_advertise_json_metadata_when_registered() {
 }
 
 fn router(retrieve: Arc<FakeRetrieve>) -> Router {
+    router_service(retrieve)
+}
+
+fn router_service(retrieve: Arc<dyn RetrieveService>) -> Router {
     DicomWebRouter::new()
         .register(WadoRsProvider::new(retrieve))
         .into_router()

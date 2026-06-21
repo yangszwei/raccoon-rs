@@ -1,9 +1,12 @@
+use std::collections::VecDeque;
+use std::pin::Pin;
+
 use axum::body::Body;
 use axum::http::{HeaderMap, HeaderValue, Uri, header};
 use axum::response::{IntoResponse, Response};
-use futures_util::StreamExt;
+use futures_util::{Stream, StreamExt, stream};
 use raccoon_contract_dicom::{DicomInstanceIdentity, TransferSyntaxUid};
-use raccoon_contract_object_store::Bytes;
+use raccoon_contract_object_store::{Bytes, ObjectStoreError};
 use raccoon_service_retrieve::{
     RetrieveError, RetrieveRequest, RetrieveResult, RetrieveScope, RetrieveService,
     RetrievedInstance,
@@ -22,6 +25,22 @@ pub(crate) struct CollectedInstance {
     pub(crate) identity: DicomInstanceIdentity,
     pub(crate) transfer_syntax_uid: Option<TransferSyntaxUid>,
     pub(crate) body: Bytes,
+}
+
+type ObjectBodyStream =
+    Pin<Box<dyn Stream<Item = Result<Bytes, ObjectStoreError>> + Send + 'static>>;
+
+struct MultipartBodyState {
+    instances:
+        Pin<Box<dyn Stream<Item = Result<RetrievedInstance, RetrieveError>> + Send + 'static>>,
+    first_instance: Option<RetrievedInstance>,
+    current_body: Option<ObjectBodyStream>,
+    pending: VecDeque<Bytes>,
+    base: Option<DicomWebUrlBase>,
+    boundary: String,
+    requested_transfer_syntax: Option<TransferSyntaxUid>,
+    policy: Option<TransferSyntaxPolicy>,
+    finished: bool,
 }
 
 pub(crate) async fn retrieve_response(
@@ -151,11 +170,20 @@ async fn multipart_response(
     policy: Option<&TransferSyntaxPolicy>,
 ) -> Result<Response, DicomWebError> {
     let base = DicomWebUrlBase::from_request(headers, uri);
-    let instances = prepare_instances(result, requested_transfer_syntax.as_ref(), policy).await?;
+    let mut instances = result.stream;
+    let first_instance =
+        next_prepared_instance(&mut instances, requested_transfer_syntax.as_ref(), policy).await?;
     let boundary = media::multipart_boundary();
-    let body = multipart_body(instances, base, &boundary).await?;
+    let body = multipart_body_stream(
+        first_instance,
+        instances,
+        base,
+        boundary.clone(),
+        requested_transfer_syntax,
+        policy.cloned(),
+    );
     Ok(media::multipart_related_response(
-        Body::from(body),
+        Body::from_stream(body),
         &boundary,
         MediaType::ApplicationDicom,
         None,
@@ -172,11 +200,9 @@ pub(crate) async fn single_instance_response(
             "application/dicom response is only available for single instance retrieve",
         ));
     }
-    let mut instances =
-        prepare_instances(result, requested_transfer_syntax.as_ref(), policy).await?;
-    let instance = instances
-        .pop()
-        .ok_or_else(|| DicomWebError::NotFound("no matching DICOM instances".to_string()))?;
+    let mut stream = result.stream;
+    let instance =
+        next_prepared_instance(&mut stream, requested_transfer_syntax.as_ref(), policy).await?;
     let content_type = media::content_type(
         MediaType::ApplicationDicom,
         &media::MediaTypeParams {
@@ -197,23 +223,17 @@ pub(crate) async fn single_instance_response(
         .into_response())
 }
 
-async fn prepare_instances(
-    result: RetrieveResult,
+async fn next_prepared_instance(
+    stream: &mut Pin<Box<dyn Stream<Item = Result<RetrievedInstance, RetrieveError>> + Send>>,
     requested_transfer_syntax: Option<&TransferSyntaxUid>,
     policy: Option<&TransferSyntaxPolicy>,
-) -> Result<Vec<RetrievedInstance>, DicomWebError> {
-    let mut stream = result.stream;
-    let mut instances = Vec::with_capacity(result.instance_count);
-    while let Some(item) = stream.next().await {
-        let instance = item.map_err(map_stream_error)?;
-        instances.push(prepare_instance(instance, requested_transfer_syntax, policy).await?);
-    }
-    if instances.is_empty() {
-        return Err(DicomWebError::NotFound(
-            "no matching DICOM instances".to_string(),
-        ));
-    }
-    Ok(instances)
+) -> Result<RetrievedInstance, DicomWebError> {
+    let instance = stream
+        .next()
+        .await
+        .ok_or_else(|| DicomWebError::NotFound("no matching DICOM instances".to_string()))?
+        .map_err(map_stream_error)?;
+    prepare_instance(instance, requested_transfer_syntax, policy).await
 }
 
 async fn prepare_instance(
@@ -287,30 +307,100 @@ async fn prepare_instance(
     }
 }
 
-async fn multipart_body(
-    instances: Vec<RetrievedInstance>,
+fn multipart_body_stream(
+    first_instance: RetrievedInstance,
+    instances: Pin<
+        Box<dyn Stream<Item = Result<RetrievedInstance, RetrieveError>> + Send + 'static>,
+    >,
     base: Option<DicomWebUrlBase>,
-    boundary: &str,
-) -> Result<Bytes, DicomWebError> {
-    let mut bytes = Vec::new();
-    for instance in instances {
-        bytes.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
-        bytes
-            .extend_from_slice(part_content_type(instance.transfer_syntax_uid.as_ref()).as_bytes());
-        bytes.extend_from_slice(b"\r\n");
-        bytes.extend_from_slice(content_location(&instance.identity, base.as_ref()).as_bytes());
-        bytes.extend_from_slice(b"\r\n\r\n");
-        let mut body = instance.body.into_stream();
-        while let Some(chunk) = body.next().await {
-            let chunk = chunk.map_err(|error| {
-                DicomWebError::Internal(format!("object stream failed: {error}"))
-            })?;
-            bytes.extend_from_slice(&chunk);
+    boundary: String,
+    requested_transfer_syntax: Option<TransferSyntaxUid>,
+    policy: Option<TransferSyntaxPolicy>,
+) -> impl Stream<Item = Result<Bytes, DicomWebError>> + Send + 'static {
+    stream::try_unfold(
+        MultipartBodyState {
+            instances,
+            first_instance: Some(first_instance),
+            current_body: None,
+            pending: VecDeque::new(),
+            base,
+            boundary,
+            requested_transfer_syntax,
+            policy,
+            finished: false,
+        },
+        next_multipart_chunk,
+    )
+}
+
+async fn next_multipart_chunk(
+    mut state: MultipartBodyState,
+) -> Result<Option<(Bytes, MultipartBodyState)>, DicomWebError> {
+    loop {
+        if let Some(chunk) = state.pending.pop_front() {
+            return Ok(Some((chunk, state)));
         }
-        bytes.extend_from_slice(b"\r\n");
+
+        if let Some(body) = state.current_body.as_mut() {
+            match body.next().await {
+                Some(Ok(chunk)) => return Ok(Some((chunk, state))),
+                Some(Err(error)) => {
+                    return Err(DicomWebError::Internal(format!(
+                        "object stream failed: {error}"
+                    )));
+                }
+                None => {
+                    state.current_body = None;
+                    state.pending.push_back(Bytes::from_static(b"\r\n"));
+                    continue;
+                }
+            }
+        }
+
+        if let Some(instance) = state.first_instance.take() {
+            begin_multipart_part(&mut state, instance);
+            continue;
+        }
+
+        if state.finished {
+            return Ok(None);
+        }
+
+        match state.instances.next().await {
+            Some(Ok(instance)) => {
+                let instance = prepare_instance(
+                    instance,
+                    state.requested_transfer_syntax.as_ref(),
+                    state.policy.as_ref(),
+                )
+                .await?;
+                begin_multipart_part(&mut state, instance);
+            }
+            Some(Err(error)) => return Err(map_stream_error(error)),
+            None => {
+                state.finished = true;
+                state
+                    .pending
+                    .push_back(Bytes::from(format!("--{}--\r\n", state.boundary)));
+            }
+        }
     }
-    bytes.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
-    Ok(Bytes::from(bytes))
+}
+
+fn begin_multipart_part(state: &mut MultipartBodyState, instance: RetrievedInstance) {
+    state
+        .pending
+        .push_back(Bytes::from(format!("--{}\r\n", state.boundary)));
+    state.pending.push_back(Bytes::from(part_content_type(
+        instance.transfer_syntax_uid.as_ref(),
+    )));
+    state.pending.push_back(Bytes::from_static(b"\r\n"));
+    state.pending.push_back(Bytes::from(content_location(
+        &instance.identity,
+        state.base.as_ref(),
+    )));
+    state.pending.push_back(Bytes::from_static(b"\r\n\r\n"));
+    state.current_body = Some(instance.body.into_stream());
 }
 
 fn part_content_type(transfer_syntax_uid: Option<&TransferSyntaxUid>) -> String {
