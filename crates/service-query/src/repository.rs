@@ -12,4 +12,6 @@ use crate::query::{DicomQuery, QueryPage};
 #[async_trait]
 pub trait QueryRepository: Send + Sync {
     async fn execute(&self, query: &DicomQuery) -> Result<QueryPage, QueryRepositoryError>;
+
+    async fn read_model_revision(&self) -> Result<u64, QueryRepositoryError>;
 }

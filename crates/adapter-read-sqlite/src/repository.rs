@@ -1,4 +1,5 @@
 use std::str::FromStr;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use raccoon_contract_dicom::{
@@ -15,7 +16,7 @@ use sqlx::{
     Row, SqlitePool,
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous},
 };
-use tracing::{Span, instrument};
+use tracing::{Instrument, Span, info_span, instrument};
 
 use crate::compile::{BindValue, compile};
 use crate::error::SqliteReadRepositoryError;
@@ -97,6 +98,8 @@ impl QueryRepository for SqliteReadRepository {
             query.scope = ?query.scope(),
             query.has_predicate = query.predicate().is_some(),
             query.has_paging = query.paging().is_some(),
+            query.row_count = tracing::field::Empty,
+            query.result_count = tracing::field::Empty,
             error.type = tracing::field::Empty,
         )
     )]
@@ -104,10 +107,14 @@ impl QueryRepository for SqliteReadRepository {
         let scope = query.scope();
         let projection = query.projection().clone();
 
-        let compiled = compile(query, &self.registry).map_err(|e| {
-            Span::current().record("error.type", "compile");
-            QueryRepositoryError::new(e.to_string())
-        })?;
+        let compiled = {
+            let span = info_span!("sqlite.query.compile");
+            let _guard = span.enter();
+            compile(query, &self.registry).map_err(|e| {
+                Span::current().record("error.type", "compile");
+                QueryRepositoryError::new(e.to_string())
+            })?
+        };
 
         let mut stmt = sqlx::query(sqlx::AssertSqlSafe(compiled.sql.as_str()));
         for bind in &compiled.binds {
@@ -117,16 +124,56 @@ impl QueryRepository for SqliteReadRepository {
             };
         }
 
-        let rows = stmt.fetch_all(&self.pool).await.map_err(|e| {
-            Span::current().record("error.type", "sqlx");
-            QueryRepositoryError::new(SqliteReadRepositoryError::Query(e).to_string())
-        })?;
+        let rows = stmt
+            .fetch_all(&self.pool)
+            .instrument(info_span!("sqlite.query.execute"))
+            .await
+            .map_err(|e| {
+                Span::current().record("error.type", "sqlx");
+                QueryRepositoryError::new(SqliteReadRepositoryError::Query(e).to_string())
+            })?;
+        let row_count = rows.len();
+        Span::current().record("query.row_count", row_count);
 
-        materialize_page(rows, &compiled, &projection, scope, &self.registry).map_err(|e| {
-            Span::current().record("error.type", "materialize");
-            QueryRepositoryError::new(e.to_string())
-        })
+        let materialize_span = info_span!(
+            "sqlite.query.materialize",
+            query.row_count = row_count,
+            query.selected_column_count = compiled.selected_mappings.len(),
+            query.includes_attributes = compiled.includes_attributes,
+        );
+        let _guard = materialize_span.enter();
+        let page =
+            materialize_page(rows, &compiled, &projection, scope, &self.registry).map_err(|e| {
+                Span::current().record("error.type", "materialize");
+                QueryRepositoryError::new(e.to_string())
+            })?;
+        Span::current().record("query.result_count", page.items.len());
+        Ok(page)
     }
+
+    async fn read_model_revision(&self) -> Result<u64, QueryRepositoryError> {
+        let revision: i64 =
+            sqlx::query_scalar("SELECT revision FROM read_model_state WHERE id = 1")
+                .fetch_one(&self.pool)
+                .await
+                .map_err(|e| {
+                    QueryRepositoryError::with_source(
+                        "failed to read read model revision",
+                        SqliteReadRepositoryError::Query(e),
+                    )
+                })?;
+
+        u64::try_from(revision)
+            .map_err(|e| QueryRepositoryError::with_source("read model revision is negative", e))
+    }
+}
+
+fn current_unix_ms() -> i64 {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or_default();
+    i64::try_from(millis).unwrap_or(i64::MAX)
 }
 
 #[async_trait]
@@ -649,6 +696,21 @@ impl SqliteReadRepository {
         .execute(&mut *tx)
         .await
         .map_err(SqliteReadRepositoryError::Query)?;
+
+        let revision_update = sqlx::query(
+            "UPDATE read_model_state \
+             SET revision = revision + 1, updated_at_unix_ms = ? \
+             WHERE id = 1",
+        )
+        .bind(current_unix_ms())
+        .execute(&mut *tx)
+        .await
+        .map_err(SqliteReadRepositoryError::Query)?;
+        if revision_update.rows_affected() != 1 {
+            return Err(SqliteReadRepositoryError::InternalError(
+                "read model state row is missing".to_string(),
+            ));
+        }
 
         tx.commit()
             .await

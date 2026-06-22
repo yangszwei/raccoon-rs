@@ -1,5 +1,6 @@
 use std::convert::TryFrom;
 use std::sync::Arc;
+use std::time::Instant;
 
 use async_trait::async_trait;
 use dicom_core::Tag;
@@ -16,7 +17,8 @@ use crate::{
     AttributePath, AttributePathSegment, AttributeValue, DicomQuery, MatchingRule,
     PatientRootQueryRetrieveLevel, Predicate, ProjectedAttribute, Projection, QueryError,
     QueryMatch, QueryPage, QueryPaging, QueryRepositoryError, QueryRetrieveView, QueryScope,
-    RangeMatching, ResponseValue, SequenceMatching, StudyRootQueryRetrieveLevel,
+    RangeMatching, ResponseValue, SequenceMatching, SortDirection, SortKey,
+    StudyRootQueryRetrieveLevel,
 };
 
 pub mod proto {
@@ -30,7 +32,9 @@ pub use proto::dicom_query_service_server::{DicomQueryService, DicomQueryService
 const RPC_SYSTEM_NAME: &str = "grpc";
 const RPC_SERVICE_QUERY: &str = "raccoon.query.v1.DicomQueryService";
 const RPC_METHOD_QUERY: &str = "Query";
+const RPC_METHOD_READ_MODEL_REVISION: &str = "ReadModelRevision";
 const METHOD_QUERY: &str = "raccoon.query.v1.DicomQueryService/Query";
+const METHOD_READ_MODEL_REVISION: &str = "raccoon.query.v1.DicomQueryService/ReadModelRevision";
 
 /// gRPC-backed DICOM query service client.
 ///
@@ -99,22 +103,95 @@ where
         )
     )]
     async fn query(&self, request: DicomQuery) -> Result<QueryPage, QueryError> {
+        let total_started_at = Instant::now();
         // Record server.address only when known; an absent attribute is preferable
         // to an empty string, which OTel backends would treat as a distinct value.
         if let Some(addr) = &self.server_address {
             Span::current().record("server.address", addr.as_str());
         }
         let mut client = self.inner.clone();
-        let proto_request = request_with_trace_context(proto::QueryRequest::from(request));
-        let result = client.query(proto_request).await;
+        let proto_request = {
+            let span = tracing::info_span!("query.grpc.client.encode_request");
+            let _guard = span.enter();
+            request_with_trace_context(proto::QueryRequest::from(request))
+        };
+        let result = client
+            .query(proto_request)
+            .instrument(tracing::info_span!(
+                "query.grpc.client.call",
+                rpc.system.name = RPC_SYSTEM_NAME,
+                rpc.service = RPC_SERVICE_QUERY,
+                rpc.method = RPC_METHOD_QUERY,
+            ))
+            .await;
 
         // Record span status only after the full response (including body parse)
         // so that a successful transport but invalid body is not recorded as OK.
         let response = result.map_err(grpc_status_to_query_err)?;
-        let page = QueryPage::try_from(response.into_inner()).map_err(grpc_status_to_query_err)?;
+        let page = {
+            let span = tracing::info_span!("query.grpc.client.decode_response");
+            let _guard = span.enter();
+            QueryPage::try_from(response.into_inner()).map_err(grpc_status_to_query_err)?
+        };
+        let result_count = page.items.len();
 
         record_ok();
+        tracing::info!(
+            rpc.system.name = RPC_SYSTEM_NAME,
+            rpc.service = RPC_SERVICE_QUERY,
+            rpc.method = RPC_METHOD_QUERY,
+            rpc.response.status_code = code_name(tonic::Code::Ok),
+            query.result_count = result_count,
+            service.duration_ms = elapsed_ms(total_started_at),
+            "Query gRPC client completed"
+        );
         Ok(page)
+    }
+
+    #[instrument(
+        skip(self),
+        fields(
+            rpc.system.name = RPC_SYSTEM_NAME,
+            rpc.service = RPC_SERVICE_QUERY,
+            rpc.method = RPC_METHOD_READ_MODEL_REVISION,
+            rpc.response.status_code = tracing::field::Empty,
+            server.address = tracing::field::Empty,
+            error.type = tracing::field::Empty,
+        )
+    )]
+    async fn read_model_revision(&self) -> Result<u64, QueryError> {
+        let started_at = Instant::now();
+        if let Some(addr) = &self.server_address {
+            Span::current().record("server.address", addr.as_str());
+        }
+        let mut client = self.inner.clone();
+        let result = client
+            .read_model_revision(request_with_trace_context(
+                proto::ReadModelRevisionRequest {},
+            ))
+            .instrument(tracing::info_span!(
+                "query.grpc.client.call",
+                rpc.system.name = RPC_SYSTEM_NAME,
+                rpc.service = RPC_SERVICE_QUERY,
+                rpc.method = RPC_METHOD_READ_MODEL_REVISION,
+            ))
+            .await;
+
+        let revision = result
+            .map_err(grpc_status_to_query_err)?
+            .into_inner()
+            .revision;
+        record_ok();
+        tracing::info!(
+            rpc.system.name = RPC_SYSTEM_NAME,
+            rpc.service = RPC_SERVICE_QUERY,
+            rpc.method = RPC_METHOD_READ_MODEL_REVISION,
+            rpc.response.status_code = code_name(tonic::Code::Ok),
+            query.read_model_revision = revision,
+            service.duration_ms = elapsed_ms(started_at),
+            "Query gRPC client completed"
+        );
+        Ok(revision)
     }
 }
 
@@ -151,6 +228,7 @@ impl DicomQueryService for QueryGrpcService {
         &self,
         request: Request<proto::QueryRequest>,
     ) -> Result<Response<proto::QueryResponse>, Status> {
+        let total_started_at = Instant::now();
         // Create the span before entering it so set_span_parent_from_metadata can
         // write the remote parent into the OTel SpanBuilder — set_parent is a
         // no-op once the span has been entered.
@@ -168,12 +246,81 @@ impl DicomQueryService for QueryGrpcService {
             // Handle parse failure explicitly so record_error() is always called
             // before returning — the `?` shorthand would exit before span fields
             // are written.
-            let query = DicomQuery::try_from(request.into_inner()).map_err(record_error)?;
+            let query = {
+                let span = tracing::info_span!("query.grpc.server.decode_request");
+                let _guard = span.enter();
+                DicomQuery::try_from(request.into_inner()).map_err(record_error)?
+            };
 
-            match self.service.query(query).await {
+            match self
+                .service
+                .query(query)
+                .instrument(tracing::info_span!("query.grpc.server.service_call"))
+                .await
+            {
                 Ok(page) => {
+                    let result_count = page.items.len();
+                    let response = {
+                        let span = tracing::info_span!(
+                            "query.grpc.server.encode_response",
+                            query.result_count = result_count,
+                        );
+                        let _guard = span.enter();
+                        Response::new(page.into())
+                    };
                     record_ok();
-                    Ok(Response::new(page.into()))
+                    tracing::info!(
+                        rpc.system.name = RPC_SYSTEM_NAME,
+                        rpc.service = RPC_SERVICE_QUERY,
+                        rpc.method = RPC_METHOD_QUERY,
+                        rpc.response.status_code = code_name(tonic::Code::Ok),
+                        query.result_count = result_count,
+                        service.duration_ms = elapsed_ms(total_started_at),
+                        "Query gRPC server completed"
+                    );
+                    Ok(response)
+                }
+                Err(QueryError::InvalidQuery(msg)) => {
+                    Err(record_error(Status::invalid_argument(msg)))
+                }
+                Err(QueryError::Repository(e)) => {
+                    Err(record_error(Status::internal(e.to_string())))
+                }
+            }
+        }
+        .instrument(rpc_span)
+        .await
+    }
+
+    async fn read_model_revision(
+        &self,
+        request: Request<proto::ReadModelRevisionRequest>,
+    ) -> Result<Response<proto::ReadModelRevisionResponse>, Status> {
+        let started_at = Instant::now();
+        let rpc_span = tracing::info_span!(
+            METHOD_READ_MODEL_REVISION,
+            rpc.system.name = RPC_SYSTEM_NAME,
+            rpc.service = RPC_SERVICE_QUERY,
+            rpc.method = RPC_METHOD_READ_MODEL_REVISION,
+            rpc.response.status_code = tracing::field::Empty,
+            error.type = tracing::field::Empty,
+        );
+        set_span_parent_from_metadata(&rpc_span, request.metadata());
+
+        async move {
+            match self.service.read_model_revision().await {
+                Ok(revision) => {
+                    record_ok();
+                    tracing::info!(
+                        rpc.system.name = RPC_SYSTEM_NAME,
+                        rpc.service = RPC_SERVICE_QUERY,
+                        rpc.method = RPC_METHOD_READ_MODEL_REVISION,
+                        rpc.response.status_code = code_name(tonic::Code::Ok),
+                        query.read_model_revision = revision,
+                        service.duration_ms = elapsed_ms(started_at),
+                        "Query gRPC server completed"
+                    );
+                    Ok(Response::new(proto::ReadModelRevisionResponse { revision }))
                 }
                 Err(QueryError::InvalidQuery(msg)) => {
                     Err(record_error(Status::invalid_argument(msg)))
@@ -574,6 +721,54 @@ impl TryFrom<proto::QueryPaging> for QueryPaging {
     }
 }
 
+impl From<SortDirection> for proto::SortDirection {
+    fn from(direction: SortDirection) -> Self {
+        match direction {
+            SortDirection::Ascending => Self::Ascending,
+            SortDirection::Descending => Self::Descending,
+        }
+    }
+}
+
+impl TryFrom<proto::SortDirection> for SortDirection {
+    type Error = Status;
+
+    fn try_from(direction: proto::SortDirection) -> Result<Self, Self::Error> {
+        match direction {
+            proto::SortDirection::Ascending => Ok(Self::Ascending),
+            proto::SortDirection::Descending => Ok(Self::Descending),
+            proto::SortDirection::Unspecified => {
+                Err(Status::invalid_argument("sort direction must be specified"))
+            }
+        }
+    }
+}
+
+impl From<SortKey> for proto::SortKey {
+    fn from(key: SortKey) -> Self {
+        Self {
+            path: Some(key.path.into()),
+            direction: proto::SortDirection::from(key.direction) as i32,
+        }
+    }
+}
+
+impl TryFrom<proto::SortKey> for SortKey {
+    type Error = Status;
+
+    fn try_from(key: proto::SortKey) -> Result<Self, Self::Error> {
+        let path = key
+            .path
+            .ok_or_else(|| Status::invalid_argument("sort key missing path"))?;
+        let direction = proto::SortDirection::try_from(key.direction)
+            .map_err(|_| Status::invalid_argument("invalid sort direction value"))?;
+        Ok(Self {
+            path: AttributePath::try_from(path)?,
+            direction: SortDirection::try_from(direction)?,
+        })
+    }
+}
+
 impl From<DicomQuery> for proto::QueryRequest {
     fn from(query: DicomQuery) -> Self {
         Self {
@@ -590,6 +785,7 @@ impl From<DicomQuery> for proto::QueryRequest {
                 .query_retrieve_view
                 .map(|v| proto::QueryRetrieveView::from(v) as i32),
             relational_query: query.relational_query,
+            sort_keys: query.sort_keys.into_iter().map(Into::into).collect(),
         }
     }
 }
@@ -647,6 +843,17 @@ impl TryFrom<proto::QueryRequest> for DicomQuery {
 
         if req.relational_query {
             query = query.with_relational_query();
+        }
+
+        if !req.sort_keys.is_empty() {
+            let sort_keys = req
+                .sort_keys
+                .into_iter()
+                .map(SortKey::try_from)
+                .collect::<Result<Vec<_>, _>>()?;
+            query = query
+                .with_sort_keys(sort_keys)
+                .map_err(|e| Status::invalid_argument(e.to_string()))?;
         }
 
         Ok(query)
@@ -833,6 +1040,10 @@ fn record_ok() {
     Span::current().record("rpc.response.status_code", code_name(tonic::Code::Ok));
 }
 
+fn elapsed_ms(started_at: Instant) -> u64 {
+    u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
 fn record_error_fields(status: &Status) {
     let code = code_name(status.code());
     Span::current().record("rpc.response.status_code", code);
@@ -923,7 +1134,7 @@ mod tests {
     use crate::{
         AttributePath, AttributeValue, DicomQuery, MatchingRule, Predicate, ProjectedAttribute,
         Projection, QueryMatch, QueryPage, QueryPaging, QueryRepositoryError, QueryRetrieveView,
-        QueryScope, RangeMatching, ResponseValue, StandardQueryService,
+        QueryScope, RangeMatching, ResponseValue, SortDirection, SortKey, StandardQueryService,
         StudyRootQueryRetrieveLevel,
     };
 
@@ -1108,7 +1319,12 @@ mod tests {
         .with_specific_character_set(vec!["ISO_IR 192".to_string()])
         .expect("valid charset")
         .with_query_retrieve_view(QueryRetrieveView::Classic)
-        .with_relational_query();
+        .with_relational_query()
+        .with_sort_keys(vec![SortKey {
+            path: AttributePath::from_tag(tags::STUDY_DATE),
+            direction: SortDirection::Descending,
+        }])
+        .expect("valid sort key");
 
         let proto_req = proto::QueryRequest::from(query.clone());
         let recovered = DicomQuery::try_from(proto_req).expect("round trip should succeed");
@@ -1130,6 +1346,7 @@ mod tests {
             Some(QueryRetrieveView::Classic)
         );
         assert!(recovered.relational_query());
+        assert_eq!(recovered.sort_keys(), query.sort_keys());
     }
 
     #[test]
@@ -1249,6 +1466,10 @@ mod tests {
         async fn execute(&self, _: &DicomQuery) -> Result<QueryPage, QueryRepositoryError> {
             Ok(self.page.clone())
         }
+
+        async fn read_model_revision(&self) -> Result<u64, QueryRepositoryError> {
+            Ok(7)
+        }
     }
 
     #[tokio::test]
@@ -1294,12 +1515,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn grpc_server_adapter_returns_read_model_revision() {
+        let service = StandardQueryService::new(Arc::new(FakeQueryRepository {
+            page: QueryPage::empty(0, 10),
+        }));
+        let adapter = QueryGrpcService::new(service);
+
+        let response = adapter
+            .read_model_revision(Request::new(proto::ReadModelRevisionRequest {}))
+            .await
+            .expect("revision should succeed");
+
+        assert_eq!(response.into_inner().revision, 7);
+    }
+
+    #[tokio::test]
     async fn grpc_server_adapter_maps_repository_error_to_internal_status() {
         struct FailingRepository;
 
         #[async_trait]
         impl crate::QueryRepository for FailingRepository {
             async fn execute(&self, _: &DicomQuery) -> Result<QueryPage, QueryRepositoryError> {
+                Err(QueryRepositoryError::new("database offline"))
+            }
+
+            async fn read_model_revision(&self) -> Result<u64, QueryRepositoryError> {
                 Err(QueryRepositoryError::new("database offline"))
             }
         }

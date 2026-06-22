@@ -55,6 +55,7 @@ CREATE TABLE series
 CREATE INDEX idx_series_study_instance_uid ON series (study_instance_uid);
 CREATE INDEX idx_series_modality           ON series (modality);
 CREATE INDEX idx_series_synced_at          ON series (synced_at_unix_ms);
+CREATE INDEX idx_series_study_series       ON series (study_instance_uid, series_instance_uid);
 
 -- ── Instances ─────────────────────────────────────────────────────────────────
 --
@@ -87,3 +88,22 @@ CREATE INDEX idx_instances_study_instance_uid  ON instances (study_instance_uid)
 CREATE INDEX idx_instances_sop_class_uid       ON instances (sop_class_uid);
 CREATE INDEX idx_instances_acquisition_dt      ON instances (acquisition_date_time);
 CREATE INDEX idx_instances_synced_at           ON instances (synced_at_unix_ms);
+CREATE INDEX idx_instances_study_series_instance
+    ON instances (study_instance_uid, series_instance_uid, sop_instance_uid);
+CREATE INDEX idx_instances_series_sop_uid
+    ON instances (series_instance_uid, sop_instance_uid);
+
+-- ── Read model state ─────────────────────────────────────────────────────────
+--
+-- Monotonic read-model revision used by response caches to detect committed
+-- catalog changes without relying on wall-clock timestamps as a version.
+
+CREATE TABLE read_model_state
+(
+    id                 INTEGER PRIMARY KEY CHECK (id = 1),
+    revision           INTEGER NOT NULL,
+    updated_at_unix_ms INTEGER NOT NULL
+);
+
+INSERT INTO read_model_state (id, revision, updated_at_unix_ms)
+VALUES (1, 0, CAST(strftime('%s', 'now') AS INTEGER) * 1000);

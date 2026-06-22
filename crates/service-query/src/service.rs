@@ -1,6 +1,8 @@
 use std::sync::Arc;
+use std::time::Instant;
 
 use async_trait::async_trait;
+use tracing::Instrument;
 
 use crate::error::QueryError;
 use crate::query::{DicomQuery, QueryPage};
@@ -10,6 +12,8 @@ use crate::repository::QueryRepository;
 #[async_trait]
 pub trait QueryService: Send + Sync {
     async fn query(&self, request: DicomQuery) -> Result<QueryPage, QueryError>;
+
+    async fn read_model_revision(&self) -> Result<u64, QueryError>;
 }
 
 /// Repository-backed implementation of [`QueryService`].
@@ -26,11 +30,46 @@ impl StandardQueryService {
 #[async_trait]
 impl QueryService for StandardQueryService {
     async fn query(&self, request: DicomQuery) -> Result<QueryPage, QueryError> {
-        self.repository
+        let started_at = Instant::now();
+        let page = self
+            .repository
             .execute(&request)
+            .instrument(tracing::info_span!(
+                "query.service.repository",
+                query.scope = ?request.scope(),
+                query.has_predicate = request.predicate().is_some(),
+                query.has_paging = request.paging().is_some(),
+            ))
             .await
-            .map_err(QueryError::Repository)
+            .map_err(QueryError::Repository)?;
+        tracing::info!(
+            query.scope = ?request.scope(),
+            query.result_count = page.items.len(),
+            service.duration_ms = elapsed_ms(started_at),
+            "Query service completed"
+        );
+        Ok(page)
     }
+
+    async fn read_model_revision(&self) -> Result<u64, QueryError> {
+        let started_at = Instant::now();
+        let revision = self
+            .repository
+            .read_model_revision()
+            .instrument(tracing::info_span!("query.service.read_model_revision"))
+            .await
+            .map_err(QueryError::Repository)?;
+        tracing::info!(
+            query.read_model_revision = revision,
+            service.duration_ms = elapsed_ms(started_at),
+            "Query service completed"
+        );
+        Ok(revision)
+    }
+}
+
+fn elapsed_ms(started_at: Instant) -> u64 {
+    u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
 #[cfg(test)]
@@ -85,6 +124,10 @@ mod tests {
                 Err(e) => Err(QueryRepositoryError::new(e.message())),
             }
         }
+
+        async fn read_model_revision(&self) -> Result<u64, QueryRepositoryError> {
+            Ok(7)
+        }
     }
 
     #[tokio::test]
@@ -109,5 +152,17 @@ mod tests {
 
         assert!(matches!(error, QueryError::Repository(_)));
         assert!(error.to_string().contains("catalog offline"));
+    }
+
+    #[tokio::test]
+    async fn standard_service_returns_read_model_revision() {
+        let service = StandardQueryService::new(Arc::new(FakeRepository::succeeding(vec![])));
+
+        let revision = service
+            .read_model_revision()
+            .await
+            .expect("revision succeeds");
+
+        assert_eq!(revision, 7);
     }
 }

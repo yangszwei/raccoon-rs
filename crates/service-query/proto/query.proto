@@ -10,6 +10,15 @@ package raccoon.query.v1;
 service DicomQueryService {
   // Execute a DICOM Query/Retrieve C-FIND–equivalent query.
   rpc Query(QueryRequest) returns (QueryResponse);
+
+  // Return the current committed read-model revision.
+  rpc ReadModelRevision(ReadModelRevisionRequest) returns (ReadModelRevisionResponse);
+}
+
+message ReadModelRevisionRequest {}
+
+message ReadModelRevisionResponse {
+  uint64 revision = 1;
 }
 
 
@@ -45,6 +54,9 @@ message QueryRequest {
 
   // Whether extended relational negotiation is active.
   bool relational_query = 9;
+
+  // Ordered sort criteria.
+  repeated SortKey sort_keys = 10;
 }
 
 // Which DICOM information model and level a query targets.
@@ -76,6 +88,19 @@ enum StudyRootLevel {
 message QueryPaging {
   uint64 offset = 1;
   uint64 limit = 2;
+}
+
+// Sort direction for a query result ordering key.
+enum SortDirection {
+  SORT_DIRECTION_UNSPECIFIED = 0;
+  SORT_DIRECTION_ASCENDING = 1;
+  SORT_DIRECTION_DESCENDING = 2;
+}
+
+// A single query result ordering key.
+message SortKey {
+  AttributePath path = 1;
+  SortDirection direction = 2;
 }
 
 // Projection: which attributes to return for each match.

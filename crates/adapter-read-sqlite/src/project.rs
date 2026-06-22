@@ -1,8 +1,8 @@
 //! Materializes SQL result rows into [`QueryMatch`] values.
 //!
-//! Every query always SELECTs all indexed columns plus the `attributes` blob.
-//! Projection (`Fields`, `All`, `Default`) is applied here on the Rust side
-//! rather than in SQL, keeping the compiled statement shape uniform.
+//! Queries SELECT only the indexed columns and `attributes` blob needed for the
+//! projection, sorting, and stable ordering. Projection (`Fields`, `All`,
+//! `Default`) is still applied here on the Rust side.
 //!
 //! # Attribute precedence
 //!
@@ -33,7 +33,7 @@ use sqlx::Row;
 
 use crate::compile::CompiledQuery;
 use crate::error::SqliteReadRepositoryError;
-use crate::schema::{ATTRIBUTE_MAPPINGS, AttributeRegistry, VrClass};
+use crate::schema::{AttributeRegistry, VrClass};
 
 /// Maximum byte size for a binary VR attribute to be inlined into a
 /// [`QueryMatch`].  Binary attributes larger than this are returned as
@@ -64,7 +64,7 @@ pub(crate) fn materialize_page(
 
     let items = rows
         .iter()
-        .map(|row| materialize_row(row, projection, scope, registry))
+        .map(|row| materialize_row(row, compiled, projection, scope, registry))
         .collect::<Result<Vec<_>, _>>()?;
 
     let (offset, limit) = compiled
@@ -77,6 +77,7 @@ pub(crate) fn materialize_page(
 
 fn materialize_row(
     row: &sqlx::sqlite::SqliteRow,
+    compiled: &CompiledQuery,
     projection: &Projection,
     scope: QueryScope,
     registry: &AttributeRegistry,
@@ -85,7 +86,7 @@ fn materialize_row(
     //    Indexed attributes always use ZeroLength (not Absent) when NULL:
     //    we know the SCP supports these attributes.
     let mut tag_map: HashMap<Tag, ResponseValue> = HashMap::new();
-    for mapping in ATTRIBUTE_MAPPINGS {
+    for mapping in &compiled.selected_mappings {
         let value = read_indexed_value(row, mapping)?;
         tag_map.insert(mapping.tag, value);
     }
@@ -101,7 +102,7 @@ fn materialize_row(
             .any(|p| tag_of_path(p).is_some_and(|t| registry.get(t).is_none())),
     };
 
-    if needs_blob {
+    if needs_blob && compiled.includes_attributes {
         let blob_str: Option<String> = row.try_get("attributes").ok().flatten();
         if let Some(json) = blob_str.as_deref().filter(|s| !s.is_empty() && *s != "{}")
             && let Ok(obj) = dicom_json::from_str::<InMemDicomObject>(json)

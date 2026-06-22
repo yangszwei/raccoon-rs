@@ -121,6 +121,75 @@ async fn upsert_synced_object_creates_read_model_rows() {
 }
 
 #[tokio::test]
+async fn migration_seeds_read_model_revision() {
+    let (repo, pool) = open_repo().await;
+
+    assert_eq!(
+        repo.read_model_revision()
+            .await
+            .expect("read model revision"),
+        0
+    );
+
+    let updated_at: i64 =
+        sqlx::query_scalar("SELECT updated_at_unix_ms FROM read_model_state WHERE id = 1")
+            .fetch_one(&pool)
+            .await
+            .expect("fetch read model state timestamp");
+    assert!(updated_at > 0);
+}
+
+#[tokio::test]
+async fn upsert_synced_object_increments_read_model_revision() {
+    let (repo, _) = open_repo().await;
+
+    repo.upsert_synced_object(&synced_object("1", "instances/one.dcm", 100))
+        .await
+        .expect("first upsert");
+    repo.upsert_synced_object(&synced_object("2", "instances/two.dcm", 200))
+        .await
+        .expect("second upsert");
+
+    assert_eq!(
+        repo.read_model_revision()
+            .await
+            .expect("read model revision"),
+        2
+    );
+}
+
+#[tokio::test]
+async fn failed_upsert_does_not_increment_read_model_revision() {
+    let (repo, pool) = open_repo().await;
+    sqlx::query(
+        "CREATE TRIGGER abort_instance_insert \
+         BEFORE INSERT ON instances \
+         BEGIN SELECT RAISE(ABORT, 'abort instance insert'); END",
+    )
+    .execute(&pool)
+    .await
+    .expect("create abort trigger");
+
+    let error = repo
+        .upsert_synced_object(&synced_object("1", "instances/one.dcm", 100))
+        .await
+        .expect_err("upsert should fail");
+
+    assert!(error.to_string().contains("failed to upsert"));
+    assert_eq!(
+        repo.read_model_revision()
+            .await
+            .expect("read model revision"),
+        0
+    );
+    let study_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM studies")
+        .fetch_one(&pool)
+        .await
+        .expect("count studies");
+    assert_eq!(study_count, 0);
+}
+
+#[tokio::test]
 async fn upsert_synced_object_is_idempotent_by_sop_instance_uid() {
     let (repo, pool) = open_repo().await;
     let mut object = synced_object("1", "instances/one.dcm", 100);

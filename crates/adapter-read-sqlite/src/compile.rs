@@ -1,9 +1,11 @@
 //! Translates a [`DicomQuery`] into a SQLite statement.
 //!
-//! Every query joins all three tables (`instances i`, `series se`, `studies s`)
-//! and always SELECTs every indexed column plus the `attributes` blob.
-//! Projection is applied on the Rust side in [`crate::project`]; the SQL side
-//! only handles filtering (WHERE) and deduplication (ROW_NUMBER).
+//! Generic queries join all three tables (`instances i`, `series se`,
+//! `studies s`). Projection is applied on the Rust side in [`crate::project`];
+//! the SQL side handles filtering (WHERE), derived relationship counts, and
+//! deduplication (ROW_NUMBER) where needed. Narrow series-level queries can use
+//! a direct `series JOIN studies` scan when no predicate or projection needs
+//! instance rows.
 //!
 //! # Deduplication
 //!
@@ -17,6 +19,8 @@
 //! When paging is requested we also compute `COUNT(*) OVER ()` on the
 //! deduplicated set, giving the total without a second round-trip to SQLite.
 
+use std::collections::HashSet;
+
 use dicom_core::Tag;
 use dicom_core::VR;
 use dicom_core::dictionary::{DataDictionary, DataDictionaryEntry};
@@ -24,12 +28,12 @@ use dicom_dictionary_std::StandardDataDictionary;
 use dicom_dictionary_std::tags;
 use raccoon_service_query::{
     AttributePath, AttributePathSegment, MatchingRule, PatientRootQueryRetrieveLevel, Predicate,
-    QueryScope, SortDirection, SortKey, StudyRootQueryRetrieveLevel,
+    Projection, QueryScope, SortDirection, SortKey, StudyRootQueryRetrieveLevel,
 };
 use raccoon_service_query::{DicomQuery, QueryPaging};
 
 use crate::error::SqliteReadRepositoryError;
-use crate::schema::{ATTRIBUTE_MAPPINGS, AttributeMapping, AttributeRegistry};
+use crate::schema::{ATTRIBUTE_MAPPINGS, AttributeMapping, AttributeRegistry, TableId};
 
 #[derive(Debug, Clone)]
 pub(crate) enum BindValue {
@@ -41,6 +45,11 @@ pub(crate) enum BindValue {
 pub(crate) struct CompiledQuery {
     pub sql: String,
     pub binds: Vec<BindValue>,
+    /// Indexed mappings actually selected by SQL. Projection materialization
+    /// uses this to avoid reading columns that were intentionally omitted.
+    pub selected_mappings: Vec<&'static AttributeMapping>,
+    /// Whether the result rows include `attributes`.
+    pub includes_attributes: bool,
     /// Whether the result rows include a `_total` column (present only when
     /// paging was requested).
     pub has_total_count: bool,
@@ -55,6 +64,9 @@ pub(crate) fn compile(
     let scope = query.scope();
     let mut binds: Vec<BindValue> = Vec::new();
     let mut seq_counter: usize = 0;
+    let selection = QuerySelection::for_query(query, registry);
+    let use_series_table_scan = supports_series_table_scan(query, registry, &selection);
+    let use_image_table_scan = supports_image_table_scan(query);
 
     let tz_offset_minutes = query
         .timezone_offset_from_utc()
@@ -76,30 +88,188 @@ pub(crate) fn compile(
 
     let paging = query.paging();
     let has_paging = paging.is_some();
-    let sql = build_sql(
-        scope,
-        where_sql.as_deref(),
-        query.sort_keys(),
-        registry,
-        has_paging,
-        &mut binds,
-        paging,
-    );
+    let sql = if use_series_table_scan {
+        build_series_table_sql(
+            where_sql.as_deref(),
+            query.sort_keys(),
+            registry,
+            &selection,
+            has_paging,
+            &mut binds,
+            paging,
+        )
+    } else if use_image_table_scan {
+        build_image_table_sql(
+            where_sql.as_deref(),
+            query.sort_keys(),
+            registry,
+            &selection,
+            has_paging,
+            &mut binds,
+            paging,
+        )
+    } else {
+        build_sql(
+            scope,
+            where_sql.as_deref(),
+            query.sort_keys(),
+            registry,
+            &selection,
+            &mut binds,
+            paging,
+        )
+    };
 
     Ok(CompiledQuery {
         sql,
         binds,
+        selected_mappings: selection.mappings,
+        includes_attributes: selection.include_attributes,
         has_total_count: has_paging,
         paging,
     })
 }
 
-/// The SELECT list is always the same: every indexed column in
-/// [`ATTRIBUTE_MAPPINGS`] order, then `i.attributes`, then the three
-/// aliased sync timestamps used for ORDER BY stability.
-fn select_list() -> String {
-    let mut cols: Vec<String> = ATTRIBUTE_MAPPINGS.iter().map(select_expr).collect();
-    cols.push("i.attributes".to_string());
+#[derive(Debug)]
+struct QuerySelection {
+    mappings: Vec<&'static AttributeMapping>,
+    include_attributes: bool,
+}
+
+impl QuerySelection {
+    fn for_query(query: &DicomQuery, registry: &AttributeRegistry) -> Self {
+        let mut tags = HashSet::new();
+        let mut include_attributes = false;
+
+        match query.projection() {
+            Projection::All => {
+                tags.extend(ATTRIBUTE_MAPPINGS.iter().map(|m| m.tag));
+                include_attributes = true;
+            }
+            Projection::Default => {
+                tags.extend(mandatory_tags_for_scope(query.scope()));
+            }
+            Projection::Fields(paths) => {
+                for path in paths {
+                    if let Some(tag) = tag_of_path(path) {
+                        if registry.get(tag).is_some() {
+                            tags.insert(tag);
+                        } else {
+                            include_attributes = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        for tag in order_key_tags_for_scope(query.scope()) {
+            tags.insert(tag);
+        }
+        for key in query.sort_keys() {
+            if let Some(tag) = tag_of_path(&key.path) {
+                if registry.get(tag).is_some() {
+                    tags.insert(tag);
+                } else {
+                    include_attributes = true;
+                }
+            }
+        }
+
+        let mappings = ATTRIBUTE_MAPPINGS
+            .iter()
+            .filter(|mapping| tags.contains(&mapping.tag))
+            .collect();
+
+        Self {
+            mappings,
+            include_attributes,
+        }
+    }
+
+    fn selects_tag(&self, tag: Tag) -> bool {
+        self.mappings.iter().any(|mapping| mapping.tag == tag)
+    }
+
+    fn needs_study_counts(&self) -> bool {
+        self.selects_tag(tags::NUMBER_OF_STUDY_RELATED_SERIES)
+            || self.selects_tag(tags::NUMBER_OF_STUDY_RELATED_INSTANCES)
+    }
+
+    fn needs_series_counts(&self) -> bool {
+        self.selects_tag(tags::NUMBER_OF_SERIES_RELATED_INSTANCES)
+    }
+
+    fn needs_study_modalities(&self) -> bool {
+        self.selects_tag(tags::MODALITIES_IN_STUDY)
+    }
+}
+
+fn supports_image_table_scan(query: &DicomQuery) -> bool {
+    matches!(
+        query.scope(),
+        QueryScope::PatientRoot(PatientRootQueryRetrieveLevel::Image)
+            | QueryScope::StudyRoot(StudyRootQueryRetrieveLevel::Image)
+    )
+}
+
+fn supports_series_table_scan(
+    query: &DicomQuery,
+    registry: &AttributeRegistry,
+    selection: &QuerySelection,
+) -> bool {
+    matches!(
+        query.scope(),
+        QueryScope::PatientRoot(PatientRootQueryRetrieveLevel::Series)
+            | QueryScope::StudyRoot(StudyRootQueryRetrieveLevel::Series)
+    ) && !selection.include_attributes
+        && selection
+            .mappings
+            .iter()
+            .all(|mapping| mapping.table != TableId::Instance)
+        && query
+            .sort_keys()
+            .iter()
+            .all(|key| series_join_direct_tag(&key.path, registry))
+        && query
+            .predicate()
+            .is_none_or(|predicate| predicate_uses_only_series_join(predicate, registry))
+}
+
+fn predicate_uses_only_series_join(predicate: &Predicate, registry: &AttributeRegistry) -> bool {
+    match predicate {
+        Predicate::All(items) => items
+            .iter()
+            .all(|item| predicate_uses_only_series_join(item, registry)),
+        Predicate::Attribute(_, MatchingRule::Sequence(_)) => false,
+        Predicate::Attribute(path, _) => series_join_direct_tag(path, registry),
+    }
+}
+
+fn series_join_direct_tag(path: &AttributePath, registry: &AttributeRegistry) -> bool {
+    tag_of_path(path).is_some_and(|tag| {
+        registry
+            .get(tag)
+            .is_some_and(|mapping| mapping.table != TableId::Instance && is_real_column_tag(tag))
+    })
+}
+
+fn is_real_column_tag(tag: Tag) -> bool {
+    !matches!(
+        tag,
+        tags::MODALITIES_IN_STUDY
+            | tags::NUMBER_OF_STUDY_RELATED_SERIES
+            | tags::NUMBER_OF_STUDY_RELATED_INSTANCES
+            | tags::NUMBER_OF_SERIES_RELATED_INSTANCES
+    )
+}
+
+/// Builds the SELECT list from only the columns observable by the projection,
+/// sort order, and stable ordering tiebreakers.
+fn select_list(selection: &QuerySelection) -> String {
+    let mut cols: Vec<String> = selection.mappings.iter().map(|m| select_expr(m)).collect();
+    if selection.include_attributes {
+        cols.push("i.attributes".to_string());
+    }
     // Aliased so all three can be SELECTed without name collisions.
     // These are infrastructure columns (not DICOM attributes) so they are not
     // in ATTRIBUTE_MAPPINGS and are never included in QueryMatch output.
@@ -130,12 +300,13 @@ fn build_sql(
     where_sql: Option<&str>,
     sort_keys: &[SortKey],
     registry: &AttributeRegistry,
-    has_paging: bool,
+    selection: &QuerySelection,
     binds: &mut Vec<BindValue>,
     paging: Option<QueryPaging>,
 ) -> String {
-    let select = select_list();
+    let select = select_list(selection);
     let where_clause = where_sql.map(|w| format!(" WHERE {w}")).unwrap_or_default();
+    let has_paging = paging.is_some();
 
     let (partition_col, default_order) = dedup_info_for_scope(scope);
 
@@ -160,43 +331,77 @@ fn build_sql(
     });
     let dedup_expr = dedup_col.as_deref().unwrap_or("");
 
-    let base_cte = format!(
-        "WITH \
-         _study_counts AS (\
-             SELECT s_count.study_instance_uid, \
-                    COUNT(DISTINCT se_count.series_instance_uid) AS number_of_study_related_series, \
-                    COUNT(DISTINCT i_count.sop_instance_uid) AS number_of_study_related_instances \
-             FROM studies s_count \
-             LEFT JOIN series se_count ON se_count.study_instance_uid = s_count.study_instance_uid \
-             LEFT JOIN instances i_count ON i_count.study_instance_uid = s_count.study_instance_uid \
-             GROUP BY s_count.study_instance_uid\
-         ), \
-         _series_counts AS (\
-             SELECT se_count.series_instance_uid, \
-                    COUNT(i_count.sop_instance_uid) AS number_of_series_related_instances \
-             FROM series se_count \
-             LEFT JOIN instances i_count ON i_count.series_instance_uid = se_count.series_instance_uid \
-             GROUP BY se_count.series_instance_uid\
-         ), \
-         _study_modalities AS (\
-             SELECT study_instance_uid, GROUP_CONCAT(modality, '\\') AS modalities_in_study \
-             FROM (\
-                 SELECT DISTINCT study_instance_uid, modality \
-                 FROM series \
-                 WHERE modality IS NOT NULL AND modality <> '' \
-                 ORDER BY study_instance_uid, modality\
-             ) \
-             GROUP BY study_instance_uid\
-         ), \
-         _base AS (SELECT {select}{dedup_expr} \
+    let mut ctes = Vec::new();
+    if selection.needs_study_counts() {
+        ctes.push(
+            "_study_counts AS (\
+                SELECT s_count.study_instance_uid, \
+                       COUNT(DISTINCT se_count.series_instance_uid) AS number_of_study_related_series, \
+                       COUNT(DISTINCT i_count.sop_instance_uid) AS number_of_study_related_instances \
+                FROM studies s_count \
+                LEFT JOIN series se_count ON se_count.study_instance_uid = s_count.study_instance_uid \
+                LEFT JOIN instances i_count ON i_count.study_instance_uid = s_count.study_instance_uid \
+                GROUP BY s_count.study_instance_uid\
+            )"
+            .to_string(),
+        );
+    }
+    if selection.needs_series_counts() {
+        ctes.push(
+            "_series_counts AS (\
+                SELECT se_count.series_instance_uid, \
+                       COUNT(i_count.sop_instance_uid) AS number_of_series_related_instances \
+                FROM series se_count \
+                LEFT JOIN instances i_count ON i_count.series_instance_uid = se_count.series_instance_uid \
+                GROUP BY se_count.series_instance_uid\
+            )"
+            .to_string(),
+        );
+    }
+    if selection.needs_study_modalities() {
+        ctes.push(
+            "_study_modalities AS (\
+                SELECT study_instance_uid, GROUP_CONCAT(modality, '\\') AS modalities_in_study \
+                FROM (\
+                    SELECT DISTINCT study_instance_uid, modality \
+                    FROM series \
+                    WHERE modality IS NOT NULL AND modality <> '' \
+                    ORDER BY study_instance_uid, modality\
+                ) \
+                GROUP BY study_instance_uid\
+            )"
+            .to_string(),
+        );
+    }
+
+    let mut derived_joins = Vec::new();
+    if selection.needs_study_counts() {
+        derived_joins
+            .push("LEFT JOIN _study_counts sc ON sc.study_instance_uid = s.study_instance_uid");
+    }
+    if selection.needs_series_counts() {
+        derived_joins.push(
+            "LEFT JOIN _series_counts sec ON sec.series_instance_uid = se.series_instance_uid",
+        );
+    }
+    if selection.needs_study_modalities() {
+        derived_joins
+            .push("LEFT JOIN _study_modalities sm ON sm.study_instance_uid = s.study_instance_uid");
+    }
+    let derived_joins = if derived_joins.is_empty() {
+        String::new()
+    } else {
+        format!(" {}", derived_joins.join(" "))
+    };
+
+    ctes.push(format!(
+        "_base AS (SELECT {select}{dedup_expr} \
          FROM instances i \
          JOIN series se ON se.series_instance_uid = i.series_instance_uid \
          JOIN studies s ON s.study_instance_uid = se.study_instance_uid \
-         LEFT JOIN _study_counts sc ON sc.study_instance_uid = s.study_instance_uid \
-         LEFT JOIN _series_counts sec ON sec.series_instance_uid = se.series_instance_uid \
-         LEFT JOIN _study_modalities sm ON sm.study_instance_uid = s.study_instance_uid \
+         {derived_joins} \
          {where_clause})"
-    );
+    ));
 
     // Dedup CTE (only for Study/Series/Patient scope).
     let (from_cte, deduped_cte) = if partition_col.is_some() {
@@ -223,7 +428,171 @@ fn build_sql(
         binds.push(BindValue::Int(p.offset() as i64));
     }
 
-    format!("{base_cte}{deduped_cte} {final_select}")
+    format!("WITH {}{deduped_cte} {final_select}", ctes.join(", "))
+}
+
+fn build_series_table_sql(
+    where_sql: Option<&str>,
+    sort_keys: &[SortKey],
+    registry: &AttributeRegistry,
+    selection: &QuerySelection,
+    has_paging: bool,
+    binds: &mut Vec<BindValue>,
+    paging: Option<QueryPaging>,
+) -> String {
+    let mut cols: Vec<String> = selection
+        .mappings
+        .iter()
+        .map(|mapping| series_table_select_expr(mapping))
+        .collect();
+    cols.push("s.synced_at_unix_ms  AS s_synced_at".to_string());
+    cols.push("se.synced_at_unix_ms AS se_synced_at".to_string());
+    cols.push("NULL AS i_synced_at".to_string());
+    let select = cols.join(", ");
+    let where_clause = where_sql.map(|w| format!(" WHERE {w}")).unwrap_or_default();
+
+    let default_order = "se_synced_at DESC, series_instance_uid";
+    let order_col = if sort_keys.is_empty() {
+        default_order.to_string()
+    } else {
+        let user_order = compile_sort_keys(sort_keys, registry);
+        format!("{user_order}, {default_order}")
+    };
+
+    let from = format!(
+        "FROM series se \
+         JOIN studies s ON s.study_instance_uid = se.study_instance_uid \
+         {where_clause}"
+    );
+    let final_select = if has_paging {
+        format!(
+            "SELECT *, COUNT(*) OVER () AS _total FROM (SELECT {select} {from}) ORDER BY {order_col} LIMIT ? OFFSET ?"
+        )
+    } else {
+        format!("SELECT {select} {from} ORDER BY {order_col}")
+    };
+
+    if has_paging {
+        let p = paging.expect("has_paging implies paging is Some");
+        binds.push(BindValue::Int(p.limit() as i64));
+        binds.push(BindValue::Int(p.offset() as i64));
+    }
+
+    final_select
+}
+
+fn build_image_table_sql(
+    where_sql: Option<&str>,
+    sort_keys: &[SortKey],
+    registry: &AttributeRegistry,
+    selection: &QuerySelection,
+    has_paging: bool,
+    binds: &mut Vec<BindValue>,
+    paging: Option<QueryPaging>,
+) -> String {
+    let select = direct_join_select_list(selection);
+    let where_clause = where_sql.map(|w| format!(" WHERE {w}")).unwrap_or_default();
+    let default_order = "i_synced_at DESC, sop_instance_uid";
+    let order_col = if sort_keys.is_empty() {
+        default_order.to_string()
+    } else {
+        let user_order = compile_sort_keys(sort_keys, registry);
+        format!("{user_order}, {default_order}")
+    };
+    let from = format!(
+        "FROM instances i \
+         JOIN series se ON se.series_instance_uid = i.series_instance_uid \
+         JOIN studies s ON s.study_instance_uid = se.study_instance_uid \
+         {where_clause}"
+    );
+    let final_select = if has_paging {
+        format!(
+            "SELECT *, COUNT(*) OVER () AS _total FROM (SELECT {select} {from}) ORDER BY {order_col} LIMIT ? OFFSET ?"
+        )
+    } else {
+        format!("SELECT {select} {from} ORDER BY {order_col}")
+    };
+
+    if has_paging {
+        let p = paging.expect("has_paging implies paging is Some");
+        binds.push(BindValue::Int(p.limit() as i64));
+        binds.push(BindValue::Int(p.offset() as i64));
+    }
+
+    final_select
+}
+
+fn direct_join_select_list(selection: &QuerySelection) -> String {
+    let mut cols: Vec<String> = selection
+        .mappings
+        .iter()
+        .map(|mapping| direct_join_select_expr(mapping))
+        .collect();
+    if selection.include_attributes {
+        cols.push("i.attributes".to_string());
+    }
+    cols.push("s.synced_at_unix_ms  AS s_synced_at".to_string());
+    cols.push("se.synced_at_unix_ms AS se_synced_at".to_string());
+    cols.push("i.synced_at_unix_ms  AS i_synced_at".to_string());
+    cols.join(", ")
+}
+
+fn direct_join_select_expr(mapping: &AttributeMapping) -> String {
+    match mapping.tag {
+        tags::NUMBER_OF_STUDY_RELATED_SERIES => "(SELECT COUNT(*) \
+              FROM series se_count \
+              WHERE se_count.study_instance_uid = s.study_instance_uid) \
+             AS number_of_study_related_series"
+            .to_string(),
+        tags::NUMBER_OF_STUDY_RELATED_INSTANCES => "(SELECT COUNT(*) \
+              FROM instances i_count \
+              WHERE i_count.study_instance_uid = s.study_instance_uid) \
+             AS number_of_study_related_instances"
+            .to_string(),
+        tags::MODALITIES_IN_STUDY => "(SELECT GROUP_CONCAT(modality, '\\') \
+              FROM (SELECT DISTINCT modality \
+                    FROM series sm_count \
+                    WHERE sm_count.study_instance_uid = s.study_instance_uid \
+                      AND modality IS NOT NULL AND modality <> '' \
+                    ORDER BY modality)) \
+             AS modalities_in_study"
+            .to_string(),
+        tags::NUMBER_OF_SERIES_RELATED_INSTANCES => "(SELECT COUNT(*) \
+              FROM instances i_count \
+              WHERE i_count.series_instance_uid = se.series_instance_uid) \
+             AS number_of_series_related_instances"
+            .to_string(),
+        _ => format!("{}.{}", mapping.table.alias(), mapping.column),
+    }
+}
+
+fn series_table_select_expr(mapping: &AttributeMapping) -> String {
+    match mapping.tag {
+        tags::NUMBER_OF_STUDY_RELATED_SERIES => "(SELECT COUNT(*) \
+              FROM series se_count \
+              WHERE se_count.study_instance_uid = s.study_instance_uid) \
+             AS number_of_study_related_series"
+            .to_string(),
+        tags::NUMBER_OF_STUDY_RELATED_INSTANCES => "(SELECT COUNT(*) \
+              FROM instances i_count \
+              WHERE i_count.study_instance_uid = s.study_instance_uid) \
+             AS number_of_study_related_instances"
+            .to_string(),
+        tags::MODALITIES_IN_STUDY => "(SELECT GROUP_CONCAT(modality, '\\') \
+              FROM (SELECT DISTINCT modality \
+                    FROM series sm_count \
+                    WHERE sm_count.study_instance_uid = s.study_instance_uid \
+                      AND modality IS NOT NULL AND modality <> '' \
+                    ORDER BY modality)) \
+             AS modalities_in_study"
+            .to_string(),
+        tags::NUMBER_OF_SERIES_RELATED_INSTANCES => "(SELECT COUNT(*) \
+              FROM instances i_count \
+              WHERE i_count.series_instance_uid = se.series_instance_uid) \
+             AS number_of_series_related_instances"
+            .to_string(),
+        _ => format!("{}.{}", mapping.table.alias(), mapping.column),
+    }
 }
 
 /// Compiles a list of [`SortKey`]s into a comma-separated SQL ORDER BY fragment.
@@ -293,6 +662,83 @@ fn dedup_info_for_scope(scope: QueryScope) -> (Option<String>, String) {
         QueryScope::PatientRoot(PatientRootQueryRetrieveLevel::Image)
         | QueryScope::StudyRoot(StudyRootQueryRetrieveLevel::Image) => {
             (None, "i_synced_at DESC, sop_instance_uid".to_string())
+        }
+    }
+}
+
+fn order_key_tags_for_scope(scope: QueryScope) -> Vec<Tag> {
+    match scope {
+        QueryScope::PatientRoot(PatientRootQueryRetrieveLevel::Patient) => {
+            vec![tags::PATIENT_ID, tags::STUDY_INSTANCE_UID]
+        }
+        QueryScope::PatientRoot(PatientRootQueryRetrieveLevel::Study)
+        | QueryScope::StudyRoot(StudyRootQueryRetrieveLevel::Study) => {
+            vec![tags::STUDY_INSTANCE_UID]
+        }
+        QueryScope::PatientRoot(PatientRootQueryRetrieveLevel::Series)
+        | QueryScope::StudyRoot(StudyRootQueryRetrieveLevel::Series) => {
+            vec![tags::SERIES_INSTANCE_UID]
+        }
+        QueryScope::PatientRoot(PatientRootQueryRetrieveLevel::Image)
+        | QueryScope::StudyRoot(StudyRootQueryRetrieveLevel::Image) => {
+            vec![tags::SOP_INSTANCE_UID]
+        }
+    }
+}
+
+fn mandatory_tags_for_scope(scope: QueryScope) -> Vec<Tag> {
+    let patient = || {
+        vec![
+            tags::PATIENT_ID,
+            tags::PATIENT_NAME,
+            tags::PATIENT_BIRTH_DATE,
+            tags::PATIENT_SEX,
+        ]
+    };
+    let study = || {
+        vec![
+            tags::STUDY_INSTANCE_UID,
+            tags::STUDY_DATE,
+            tags::STUDY_TIME,
+            tags::ACCESSION_NUMBER,
+            tags::MODALITIES_IN_STUDY,
+            tags::REFERRING_PHYSICIAN_NAME,
+            tags::STUDY_ID,
+            tags::STUDY_DESCRIPTION,
+            tags::NUMBER_OF_STUDY_RELATED_SERIES,
+            tags::NUMBER_OF_STUDY_RELATED_INSTANCES,
+        ]
+    };
+    let series = || {
+        vec![
+            tags::SERIES_INSTANCE_UID,
+            tags::MODALITY,
+            tags::SERIES_NUMBER,
+            tags::NUMBER_OF_SERIES_RELATED_INSTANCES,
+        ]
+    };
+    let image = || {
+        vec![
+            tags::SOP_INSTANCE_UID,
+            tags::SOP_CLASS_UID,
+            tags::INSTANCE_NUMBER,
+            tags::TRANSFER_SYNTAX_UID,
+        ]
+    };
+
+    match scope {
+        QueryScope::PatientRoot(PatientRootQueryRetrieveLevel::Patient) => patient(),
+        QueryScope::PatientRoot(PatientRootQueryRetrieveLevel::Study)
+        | QueryScope::StudyRoot(StudyRootQueryRetrieveLevel::Study) => {
+            [patient(), study()].concat()
+        }
+        QueryScope::PatientRoot(PatientRootQueryRetrieveLevel::Series)
+        | QueryScope::StudyRoot(StudyRootQueryRetrieveLevel::Series) => {
+            [patient(), study(), series()].concat()
+        }
+        QueryScope::PatientRoot(PatientRootQueryRetrieveLevel::Image)
+        | QueryScope::StudyRoot(StudyRootQueryRetrieveLevel::Image) => {
+            [patient(), study(), series(), image()].concat()
         }
     }
 }
@@ -785,6 +1231,16 @@ fn single_tag(path: &AttributePath) -> Result<Tag, SqliteReadRepositoryError> {
         })
 }
 
+fn tag_of_path(path: &AttributePath) -> Option<Tag> {
+    path.segments().iter().find_map(|s| {
+        if let AttributePathSegment::Tag(t) = s {
+            Some(*t)
+        } else {
+            None
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use dicom_dictionary_std::tags;
@@ -802,6 +1258,14 @@ mod tests {
 
     fn study_scope() -> QueryScope {
         QueryScope::StudyRoot(StudyRootQueryRetrieveLevel::Study)
+    }
+
+    fn series_scope() -> QueryScope {
+        QueryScope::StudyRoot(StudyRootQueryRetrieveLevel::Series)
+    }
+
+    fn image_scope() -> QueryScope {
+        QueryScope::StudyRoot(StudyRootQueryRetrieveLevel::Image)
     }
 
     fn compile_ok(query: &DicomQuery, registry: &AttributeRegistry) -> CompiledQuery {
@@ -922,6 +1386,118 @@ mod tests {
 
         assert!(compiled.sql.contains("json_extract(i.attributes"));
         assert!(compiled.sql.contains("00080070"));
+    }
+
+    #[test]
+    fn indexed_fields_projection_omits_attributes_blob() {
+        let query = DicomQuery::new(
+            study_scope(),
+            Projection::Fields(vec![
+                AttributePath::from_tag(tags::STUDY_INSTANCE_UID),
+                AttributePath::from_tag(tags::PATIENT_ID),
+            ]),
+        )
+        .expect("valid query");
+        let compiled = compile_ok(&query, &registry());
+
+        assert!(!compiled.includes_attributes);
+        assert!(!compiled.sql.contains("i.attributes"));
+        assert!(compiled.sql.contains("s.study_instance_uid"));
+        assert!(compiled.sql.contains("s.patient_id"));
+    }
+
+    #[test]
+    fn non_indexed_fields_projection_selects_attributes_blob() {
+        let query = DicomQuery::new(
+            study_scope(),
+            Projection::Fields(vec![AttributePath::from_tag(tags::MANUFACTURER)]),
+        )
+        .expect("valid query");
+        let compiled = compile_ok(&query, &registry());
+
+        assert!(compiled.includes_attributes);
+        assert!(compiled.sql.contains("i.attributes"));
+    }
+
+    #[test]
+    fn series_scope_uses_series_table_scan_without_window_dedup() {
+        let query = DicomQuery::new(series_scope(), Projection::Default)
+            .expect("valid query")
+            .with_predicate(Predicate::All(vec![
+                Predicate::Attribute(
+                    AttributePath::from_tag(tags::STUDY_INSTANCE_UID),
+                    MatchingRule::SingleValue("1.2.3".to_string()),
+                ),
+                Predicate::Attribute(
+                    AttributePath::from_tag(tags::SERIES_INSTANCE_UID),
+                    MatchingRule::SingleValue("1.2.3.4".to_string()),
+                ),
+            ]))
+            .expect("valid predicate");
+        let compiled = compile_ok(&query, &registry());
+
+        assert!(compiled.sql.contains("FROM series se"));
+        assert!(!compiled.sql.contains("ROW_NUMBER()"));
+        assert!(!compiled.sql.contains("FROM instances i JOIN"));
+        assert!(
+            compiled
+                .sql
+                .contains("CAST(s.study_instance_uid AS TEXT) = ?")
+        );
+        assert!(
+            compiled
+                .sql
+                .contains("CAST(se.series_instance_uid AS TEXT) = ?")
+        );
+    }
+
+    #[test]
+    fn series_scope_with_blob_dependency_keeps_generic_join() {
+        let query = DicomQuery::new(series_scope(), Projection::Default)
+            .expect("valid query")
+            .with_predicate(Predicate::Attribute(
+                AttributePath::from_tag(tags::MANUFACTURER),
+                MatchingRule::SingleValue("ACME".to_string()),
+            ))
+            .expect("valid predicate");
+        let compiled = compile_ok(&query, &registry());
+
+        assert!(compiled.sql.contains("FROM instances i"));
+        assert!(compiled.sql.contains("ROW_NUMBER()"));
+        assert!(compiled.sql.contains("json_extract(i.attributes"));
+    }
+
+    #[test]
+    fn image_scope_uses_direct_instance_table_scan() {
+        let query = DicomQuery::new(image_scope(), Projection::Default)
+            .expect("valid query")
+            .with_predicate(Predicate::All(vec![
+                Predicate::Attribute(
+                    AttributePath::from_tag(tags::STUDY_INSTANCE_UID),
+                    MatchingRule::SingleValue("1.2.3".to_string()),
+                ),
+                Predicate::Attribute(
+                    AttributePath::from_tag(tags::SERIES_INSTANCE_UID),
+                    MatchingRule::SingleValue("1.2.3.4".to_string()),
+                ),
+                Predicate::Attribute(
+                    AttributePath::from_tag(tags::SOP_INSTANCE_UID),
+                    MatchingRule::SingleValue("1.2.3.4.5".to_string()),
+                ),
+            ]))
+            .expect("valid predicate");
+        let compiled = compile_ok(&query, &registry());
+
+        assert!(compiled.sql.contains("FROM instances i"));
+        assert!(compiled.sql.contains("JOIN series se"));
+        assert!(compiled.sql.contains("JOIN studies s"));
+        assert!(!compiled.sql.contains("_base AS"));
+        assert!(!compiled.sql.contains("ROW_NUMBER()"));
+        assert!(
+            compiled
+                .sql
+                .contains("CAST(i.sop_instance_uid AS TEXT) = ?")
+        );
     }
 
     #[test]

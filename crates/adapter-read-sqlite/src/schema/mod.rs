@@ -5,6 +5,7 @@ use std::collections::HashMap;
 
 pub(crate) use attributes::{ATTRIBUTE_MAPPINGS, AttributeMapping, VrClass};
 use dicom_core::Tag;
+pub(crate) use tables::TableId;
 
 /// O(1) tag → [`AttributeMapping`] lookup, built once from [`ATTRIBUTE_MAPPINGS`].
 #[derive(Debug)]
