@@ -1918,6 +1918,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "raccoon-adapter-read-postgres"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "dicom-core",
+ "dicom-dictionary-std",
+ "dicom-json",
+ "dicom-object",
+ "raccoon-contract-dicom",
+ "raccoon-contract-object-store",
+ "raccoon-service-query",
+ "raccoon-service-retrieve",
+ "raccoon-service-sync",
+ "serde_json",
+ "sqlx",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "raccoon-adapter-read-sqlite"
 version = "0.1.0"
 dependencies = [
