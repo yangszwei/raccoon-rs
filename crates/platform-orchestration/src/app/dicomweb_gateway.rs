@@ -48,7 +48,8 @@ pub async fn build_dicomweb_gateway_app(
     let query_service = build_grpc_query_service(&config.query).await?;
     let retrieve_service = build_grpc_retrieve_service(&config.retrieve).await?;
     let ingest_service = build_grpc_ingest_service(&config.ingest).await?;
-    let read_repositories = build_read_repository_handles(&config.filesystem).await?;
+    let read_repositories =
+        build_read_repository_handles(&config.database, &config.filesystem).await?;
     let router = build_dicomweb_router(
         ingest_service,
         query_service,

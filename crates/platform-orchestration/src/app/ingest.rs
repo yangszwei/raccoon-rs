@@ -48,7 +48,8 @@ pub async fn build_ingest_app(
         &config.storage,
         quarantine_object_store_root(&config.filesystem),
     );
-    let repositories = build_ingest_repository_handles(&config.filesystem).await?;
+    let repositories =
+        build_ingest_repository_handles(&config.database, &config.filesystem).await?;
     let ingest_service = build_ingest_service(
         object_store,
         quarantine_object_store,

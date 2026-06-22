@@ -20,8 +20,10 @@ grpc = [
 
 [dependencies]
 axum = "0.8.9"
+raccoon-adapter-ingest-repository-postgres = { path = "../adapter-ingest-repository-postgres" }
 raccoon-adapter-ingest-repository-sqlite = { path = "../adapter-ingest-repository-sqlite" }
 raccoon-adapter-object-store-filesystem = { path = "../adapter-object-store-filesystem" }
+raccoon-adapter-read-postgres = { path = "../adapter-read-postgres" }
 raccoon-adapter-read-sqlite = { path = "../adapter-read-sqlite" }
 raccoon-contract-object-store = { path = "../contract-object-store" }
 raccoon-platform-config = { path = "../platform-config" }

@@ -19,9 +19,19 @@ pub enum OrchestrationError {
         #[from] raccoon_adapter_ingest_repository_sqlite::SqliteIngestRepositoryError,
     ),
 
+    /// Postgres ingest repository could not be opened or migrated.
+    #[error(transparent)]
+    PostgresIngestRepository(
+        #[from] raccoon_adapter_ingest_repository_postgres::PostgresIngestRepositoryError,
+    ),
+
     /// SQLite read repository could not be opened or migrated.
     #[error(transparent)]
     SqliteReadRepository(#[from] raccoon_adapter_read_sqlite::SqliteReadRepositoryError),
+
+    /// Postgres read repository could not be opened or migrated.
+    #[error(transparent)]
+    PostgresReadRepository(#[from] raccoon_adapter_read_postgres::PostgresReadRepositoryError),
 
     /// Configured network address could not be parsed.
     #[error(transparent)]

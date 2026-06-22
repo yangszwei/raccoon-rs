@@ -2024,8 +2024,10 @@ name = "raccoon-platform-orchestration"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "raccoon-adapter-ingest-repository-postgres",
  "raccoon-adapter-ingest-repository-sqlite",
  "raccoon-adapter-object-store-filesystem",
+ "raccoon-adapter-read-postgres",
  "raccoon-adapter-read-sqlite",
  "raccoon-contract-object-store",
  "raccoon-platform-config",

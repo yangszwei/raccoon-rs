@@ -33,7 +33,7 @@ impl QueryApp {
 
 /// Build the query service application from loaded configuration.
 pub async fn build_query_app(config: &QueryServiceConfig) -> Result<QueryApp, OrchestrationError> {
-    let repositories = build_read_repository_handles(&config.filesystem).await?;
+    let repositories = build_read_repository_handles(&config.database, &config.filesystem).await?;
     let service = build_query_service(repositories.query_repository);
     let (local_addr, incoming) = bind_grpc_listener("query", &config.grpc).await?;
 

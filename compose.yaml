@@ -6,6 +6,14 @@ x-raccoon-grpc-environment: &raccoon-grpc-environment
 x-raccoon-data-environment: &raccoon-data-environment
   RACCOON__FILESYSTEM__ROOT: /data
 
+x-raccoon-write-database-environment: &raccoon-write-database-environment
+  RACCOON__DATABASE__TYPE: postgresql
+  RACCOON__DATABASE__URL: postgres://raccoon:raccoon@write-postgres:5432/raccoon
+
+x-raccoon-read-database-environment: &raccoon-read-database-environment
+  RACCOON__DATABASE__TYPE: postgresql
+  RACCOON__DATABASE__URL: postgres://raccoon:raccoon@read-postgres:5432/raccoon
+
 x-raccoon-service-endpoint-environment: &raccoon-service-endpoint-environment
   RACCOON__APPLICATION_ENTITY_REGISTRY__ENDPOINT: http://application-entity-registry:50051
   RACCOON__INGEST__ENDPOINT: http://ingest:50051
@@ -13,6 +21,36 @@ x-raccoon-service-endpoint-environment: &raccoon-service-endpoint-environment
   RACCOON__RETRIEVE__ENDPOINT: http://retrieve:50051
 
 services:
+  write-postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: raccoon
+      POSTGRES_USER: raccoon
+      POSTGRES_PASSWORD: raccoon
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U raccoon -d raccoon" ]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+    volumes:
+      - write-postgres-data:/var/lib/postgresql/data
+
+  read-postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: raccoon
+      POSTGRES_USER: raccoon
+      POSTGRES_PASSWORD: raccoon
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U raccoon -d raccoon" ]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+    volumes:
+      - read-postgres-data:/var/lib/postgresql/data
+
   dicomweb-gateway:
     image: raccoon-dicomweb-gateway:${IMAGE_TAG:-local}
     build:
@@ -21,6 +59,8 @@ services:
       args:
         PACKAGE: raccoon-dicomweb-gateway
     depends_on:
+      read-postgres:
+        condition: service_healthy
       ingest:
         condition: service_healthy
       query:
@@ -28,13 +68,12 @@ services:
       retrieve:
         condition: service_healthy
     environment:
-      <<: [ *raccoon-data-environment, *raccoon-service-endpoint-environment ]
+      <<: [ *raccoon-data-environment, *raccoon-read-database-environment, *raccoon-service-endpoint-environment ]
       RACCOON_DICOMWEB_GATEWAY__DICOMWEB__BIND_ADDRESS: 0.0.0.0:8080
       RACCOON_DICOMWEB_GATEWAY__DICOMWEB__RENDER_CACHE__DIRECTORY: /data/dicomweb-render-cache
     ports:
       - "8080:8080"
     volumes:
-      - read-db:/data/read
       - dicomweb-render-cache:/data/dicomweb-render-cache
 
   dimse-gateway:
@@ -85,8 +124,11 @@ services:
       dockerfile: Dockerfile
       args:
         PACKAGE: raccoon-ingest
+    depends_on:
+      write-postgres:
+        condition: service_healthy
     environment:
-      <<: [ *raccoon-grpc-environment, *raccoon-data-environment ]
+      <<: [ *raccoon-grpc-environment, *raccoon-data-environment, *raccoon-write-database-environment ]
     healthcheck:
       test: [ "CMD", "grpc-healthcheck", "http://127.0.0.1:50051" ]
       interval: 5s
@@ -94,7 +136,6 @@ services:
       retries: 20
       start_period: 3s
     volumes:
-      - ingest-db:/data/ingest
       - objects:/data/objects
 
   query:
@@ -104,16 +145,17 @@ services:
       dockerfile: Dockerfile
       args:
         PACKAGE: raccoon-query
+    depends_on:
+      read-postgres:
+        condition: service_healthy
     environment:
-      <<: [ *raccoon-grpc-environment, *raccoon-data-environment ]
+      <<: [ *raccoon-grpc-environment, *raccoon-data-environment, *raccoon-read-database-environment ]
     healthcheck:
       test: [ "CMD", "grpc-healthcheck", "http://127.0.0.1:50051" ]
       interval: 5s
       timeout: 3s
       retries: 20
       start_period: 3s
-    volumes:
-      - read-db:/data/read
 
   retrieve:
     image: raccoon-retrieve:${IMAGE_TAG:-local}
@@ -122,8 +164,11 @@ services:
       dockerfile: Dockerfile
       args:
         PACKAGE: raccoon-retrieve
+    depends_on:
+      read-postgres:
+        condition: service_healthy
     environment:
-      <<: [ *raccoon-grpc-environment, *raccoon-data-environment ]
+      <<: [ *raccoon-grpc-environment, *raccoon-data-environment, *raccoon-read-database-environment ]
     healthcheck:
       test: [ "CMD", "grpc-healthcheck", "http://127.0.0.1:50051" ]
       interval: 5s
@@ -131,7 +176,6 @@ services:
       retries: 20
       start_period: 3s
     volumes:
-      - read-db:/data/read
       - objects:/data/objects
 
   sync:
@@ -141,8 +185,17 @@ services:
       dockerfile: Dockerfile
       args:
         PACKAGE: raccoon-sync
+    depends_on:
+      write-postgres:
+        condition: service_healthy
+      read-postgres:
+        condition: service_healthy
     environment:
       <<: [ *raccoon-grpc-environment, *raccoon-data-environment ]
+      RACCOON_SYNC__DATABASE__WRITE__TYPE: postgresql
+      RACCOON_SYNC__DATABASE__WRITE__URL: postgres://raccoon:raccoon@write-postgres:5432/raccoon
+      RACCOON_SYNC__DATABASE__READ__TYPE: postgresql
+      RACCOON_SYNC__DATABASE__READ__URL: postgres://raccoon:raccoon@read-postgres:5432/raccoon
     healthcheck:
       test: [ "CMD", "grpc-healthcheck", "http://127.0.0.1:50051" ]
       interval: 5s
@@ -150,12 +203,10 @@ services:
       retries: 20
       start_period: 3s
     volumes:
-      - ingest-db:/data/ingest
-      - read-db:/data/read
       - objects:/data/objects
 
 volumes:
   dicomweb-render-cache:
-  ingest-db:
-  read-db:
   objects:
+  read-postgres-data:
+  write-postgres-data:

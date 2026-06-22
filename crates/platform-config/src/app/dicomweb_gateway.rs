@@ -3,6 +3,7 @@ use serde::Deserialize;
 
 use crate::ConfigError;
 use crate::component::app::AppConfig;
+use crate::component::database::DatabaseConfig;
 use crate::component::dcmtk::DcmtkConfig;
 use crate::component::dicomweb::DicomWebConfig;
 use crate::component::filesystem::FilesystemConfig;
@@ -22,6 +23,9 @@ pub struct DicomWebGatewayConfig {
 
     /// DICOMweb HTTP listener and provider settings.
     pub dicomweb: DicomWebConfig,
+
+    /// Read-side database used for WADO-RS metadata lookup.
+    pub database: DatabaseConfig,
 
     /// Local filesystem configuration for read-model metadata lookup.
     pub filesystem: FilesystemConfig,
@@ -76,6 +80,10 @@ mod tests {
         assert_eq!(config.query.endpoint, "http://127.0.0.1:50051");
         assert_eq!(config.retrieve.endpoint, "http://127.0.0.1:50051");
         assert_eq!(config.ingest.endpoint, "http://127.0.0.1:50051");
+        assert!(matches!(
+            config.database,
+            crate::component::database::DatabaseConfig::Sqlite
+        ));
         assert_eq!(config.filesystem.root.display().to_string(), "data");
     }
 
@@ -110,6 +118,11 @@ mod tests {
                 "http://127.0.0.1:61052",
             );
             std::env::set_var("RACCOON_DICOMWEB_GATEWAY__DCMTK__PATH", "/opt/dcmtk/bin");
+            std::env::set_var("RACCOON_DICOMWEB_GATEWAY__DATABASE__TYPE", "postgresql");
+            std::env::set_var(
+                "RACCOON_DICOMWEB_GATEWAY__DATABASE__URL",
+                "postgres://raccoon:raccoon@read-postgres:5432/raccoon",
+            );
         }
 
         let config: DicomWebGatewayConfig = Config::builder()
@@ -125,11 +138,17 @@ mod tests {
             config.dcmtk.path.unwrap().display().to_string(),
             "/opt/dcmtk/bin"
         );
+        let crate::component::database::DatabaseConfig::PostgreSql { url } = config.database else {
+            panic!("expected postgresql database config");
+        };
+        assert_eq!(url, "postgres://raccoon:raccoon@read-postgres:5432/raccoon");
 
         unsafe {
             std::env::remove_var("RACCOON_DICOMWEB_GATEWAY__DICOMWEB__BIND_ADDRESS");
             std::env::remove_var("RACCOON_DICOMWEB_GATEWAY__QUERY__ENDPOINT");
             std::env::remove_var("RACCOON_DICOMWEB_GATEWAY__DCMTK__PATH");
+            std::env::remove_var("RACCOON_DICOMWEB_GATEWAY__DATABASE__TYPE");
+            std::env::remove_var("RACCOON_DICOMWEB_GATEWAY__DATABASE__URL");
         }
     }
 

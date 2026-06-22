@@ -15,6 +15,9 @@ ttl_seconds = 86400
 max_bytes = 536870912
 default_rendered_media_type = "image/jpeg"
 
+[database]
+type = "sqlite"
+
 [filesystem]
 root = "data"
 

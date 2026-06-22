@@ -1,9 +1,11 @@
 use std::sync::Arc;
 
+use raccoon_platform_config::component::database::DatabaseConfig;
 use raccoon_platform_config::component::filesystem::FilesystemConfig;
 use raccoon_service_ingest::IngestRepository;
 use raccoon_service_sync::{SyncQuarantineRepository, SyncSourceRepository};
 
+use crate::adapter::ingest_repository_postgres::build_postgres_ingest_repository;
 use crate::adapter::ingest_repository_sqlite::build_sqlite_ingest_repository;
 use crate::error::OrchestrationError;
 
@@ -30,13 +32,25 @@ pub struct IngestRepositoryHandles {
 
 /// Build ingest-side repository contract handles from loaded configuration.
 pub async fn build_ingest_repository_handles(
+    database: &DatabaseConfig,
     filesystem: &FilesystemConfig,
 ) -> Result<IngestRepositoryHandles, OrchestrationError> {
-    let repository = Arc::new(build_sqlite_ingest_repository(filesystem).await?);
-
-    Ok(IngestRepositoryHandles {
-        ingest_repository: repository.clone(),
-        sync_source_repository: repository.clone(),
-        sync_quarantine_repository: repository,
-    })
+    match database {
+        DatabaseConfig::Sqlite => {
+            let repository = Arc::new(build_sqlite_ingest_repository(filesystem).await?);
+            Ok(IngestRepositoryHandles {
+                ingest_repository: repository.clone(),
+                sync_source_repository: repository.clone(),
+                sync_quarantine_repository: repository,
+            })
+        }
+        DatabaseConfig::PostgreSql { url } => {
+            let repository = Arc::new(build_postgres_ingest_repository(url).await?);
+            Ok(IngestRepositoryHandles {
+                ingest_repository: repository.clone(),
+                sync_source_repository: repository.clone(),
+                sync_quarantine_repository: repository,
+            })
+        }
+    }
 }

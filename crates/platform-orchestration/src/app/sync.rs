@@ -45,8 +45,10 @@ pub async fn build_sync_app(config: &SyncServiceConfig) -> Result<SyncApp, Orche
         &config.storage,
         quarantine_object_store_root(&config.filesystem),
     );
-    let ingest_repositories = build_ingest_repository_handles(&config.filesystem).await?;
-    let read_repositories = build_read_repository_handles(&config.filesystem).await?;
+    let ingest_repositories =
+        build_ingest_repository_handles(&config.database.write, &config.filesystem).await?;
+    let read_repositories =
+        build_read_repository_handles(&config.database.read, &config.filesystem).await?;
     let service = build_sync_service(
         ingest_repositories.sync_source_repository,
         read_repositories.sync_read_model_writer,

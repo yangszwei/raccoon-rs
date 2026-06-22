@@ -1,8 +1,19 @@
 [app]
 name = "raccoon-sync"
 
-[database]
+[database.read]
 type = "sqlite"
+
+# [database.read]
+# type = "postgresql"
+# url = "postgres://raccoon:raccoon@read-postgres:5432/raccoon"
+
+[database.write]
+type = "sqlite"
+
+# [database.write]
+# type = "postgresql"
+# url = "postgres://raccoon:raccoon@write-postgres:5432/raccoon"
 
 [filesystem]
 root = "data"

@@ -10,6 +10,17 @@ use crate::component::runtime::RuntimeConfig;
 use crate::component::storage::StorageConfig;
 use crate::component::telemetry::TelemetryConfig;
 
+/// Database configuration for sync's source and destination stores.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct SyncDatabaseConfig {
+    /// Read-side database where sync writes the query/retrieve model.
+    pub read: DatabaseConfig,
+
+    /// Write-side ingest database where sync claims pending objects.
+    pub write: DatabaseConfig,
+}
+
 /// Top-level configuration for the sync gRPC service.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
@@ -17,8 +28,8 @@ pub struct SyncServiceConfig {
     /// Application-level identity and process settings.
     pub app: AppConfig,
 
-    /// Database backend configuration.
-    pub database: DatabaseConfig,
+    /// Database backend configuration for read and write sides.
+    pub database: SyncDatabaseConfig,
 
     /// Local filesystem configuration.
     pub filesystem: FilesystemConfig,
@@ -79,6 +90,14 @@ mod tests {
         assert_eq!(config.app.name, "raccoon-sync");
         assert_eq!(config.filesystem.root.to_string_lossy(), "data");
         assert_eq!(config.grpc.bind_address, "127.0.0.1:50055");
+        assert!(matches!(
+            config.database.read,
+            crate::component::database::DatabaseConfig::Sqlite
+        ));
+        assert!(matches!(
+            config.database.write,
+            crate::component::database::DatabaseConfig::Sqlite
+        ));
     }
 
     fn example_config_path() -> std::path::PathBuf {

@@ -65,8 +65,10 @@ pub async fn build_monolith_app(
         quarantine_object_store_root(&config.filesystem),
     );
 
-    let ingest_repositories = build_ingest_repository_handles(&config.filesystem).await?;
-    let read_repositories = build_read_repository_handles(&config.filesystem).await?;
+    let ingest_repositories =
+        build_ingest_repository_handles(&config.database, &config.filesystem).await?;
+    let read_repositories =
+        build_read_repository_handles(&config.database, &config.filesystem).await?;
 
     let ingest_service = build_ingest_service(
         object_store.clone(),
