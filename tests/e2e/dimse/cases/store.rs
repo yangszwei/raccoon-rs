@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use crate::assertions::command_succeeded;
 use crate::dcmtk::{self, StoreOptions};
 use crate::harness::DimseEndpoint;
@@ -12,6 +14,27 @@ pub fn association_and_transfer_parameters(ctx: &impl DimseEndpoint) {
     calling_ae_variation(ctx);
     transfer_syntax_proposals(ctx);
     pdu_size_variation(ctx);
+    ctx.wait_until_fixture_is_queryable();
+}
+
+pub fn batch_store_benchmark(ctx: &impl DimseEndpoint, batch_size: usize) {
+    let files = std::iter::repeat_n(ctx.fixture().path.as_path(), batch_size.max(1));
+    let started_at = Instant::now();
+    let output = dcmtk::storescu_files(
+        ctx.host(),
+        ctx.port(),
+        ctx.called_ae(),
+        files,
+        &StoreOptions::default(),
+    );
+    let elapsed = started_at.elapsed();
+    command_succeeded("C-STORE batch stores fixture", &output);
+    eprintln!(
+        "C-STORE batch benchmark: files={} elapsed_ms={} per_file_ms={:.3}",
+        batch_size.max(1),
+        elapsed.as_millis(),
+        elapsed.as_secs_f64() * 1000.0 / batch_size.max(1) as f64,
+    );
     ctx.wait_until_fixture_is_queryable();
 }
 

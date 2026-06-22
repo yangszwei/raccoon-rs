@@ -122,6 +122,19 @@ pub fn storescu(
     file: &Path,
     options: &StoreOptions,
 ) -> CommandOutput {
+    storescu_files(host, port, called_ae, [file], options)
+}
+
+pub fn storescu_files<'a, I>(
+    host: &str,
+    port: u16,
+    called_ae: &str,
+    files: I,
+    options: &StoreOptions,
+) -> CommandOutput
+where
+    I: IntoIterator<Item = &'a Path>,
+{
     let mut cmd = Command::new("storescu");
     cmd.arg("-v")
         .arg("-aet")
@@ -134,7 +147,10 @@ pub fn storescu(
     if let Some(max_pdu) = options.max_pdu {
         cmd.arg("-pdu").arg(max_pdu.to_string());
     }
-    cmd.arg(host).arg(port.to_string()).arg(file);
+    cmd.arg(host).arg(port.to_string());
+    for file in files {
+        cmd.arg(file);
+    }
     run(cmd)
 }
 

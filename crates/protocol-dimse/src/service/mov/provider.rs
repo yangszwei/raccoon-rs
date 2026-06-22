@@ -1,5 +1,6 @@
 use std::io::Cursor;
 use std::sync::Arc;
+use std::time::Instant;
 
 use async_trait::async_trait;
 use dicom_core::{DataElement, Tag, VR};
@@ -12,6 +13,7 @@ use raccoon_service_retrieve::{
     RetrieveError, RetrieveRequest, RetrieveScope, RetrieveService, RetrievedInstance,
 };
 use thiserror::Error;
+use tracing::Instrument;
 
 use super::message::{CMoveRequest, CMoveResponse, CMoveStatus};
 use crate::association::AssociationContext;
@@ -107,13 +109,24 @@ impl MoveServiceProvider {
 impl ServiceClassProvider for MoveServiceProvider {
     #[tracing::instrument(skip(self, ctx), fields(command = "C-MOVE"))]
     async fn handle(&self, ctx: &mut AssociationContext) -> Result<(), DimseError> {
-        let command = ctx.read_command().await?;
+        let started_at = Instant::now();
+        let command = ctx
+            .read_command()
+            .instrument(tracing::info_span!("dimse.cmove.read_command"))
+            .await?;
         let request = CMoveRequest::from_command(&command)?;
         let mut suboperation_message_id = next_message_id(request.message_id);
-        let identifier = read_identifier(ctx, request.presentation_context_id).await?;
+        let identifier = read_identifier(ctx, request.presentation_context_id)
+            .instrument(tracing::info_span!("dimse.cmove.read_identifier"))
+            .await?;
         let originator_ae_title = match ctx.association().peer_ae_title() {
             Some(title) => title.as_str().to_string(),
             None => {
+                log_move_completed(
+                    started_at,
+                    CMoveStatus::UnableToProcess,
+                    MoveResponseCounts::final_error(),
+                );
                 return send_move_response(
                     ctx,
                     &request,
@@ -128,12 +141,18 @@ impl ServiceClassProvider for MoveServiceProvider {
         if let Err(error) = self
             .destination_store
             .validate_destination(&request.move_destination)
+            .instrument(tracing::info_span!(
+                "dimse.cmove.validate_destination",
+                dimse.move_destination = request.move_destination.as_str(),
+            ))
             .await
         {
+            let status = destination_error_status(&error);
+            log_move_completed(started_at, status, MoveResponseCounts::final_error());
             return send_move_response(
                 ctx,
                 &request,
-                destination_error_status(&error),
+                status,
                 MoveResponseCounts::final_error(),
                 Some(error.to_string()),
                 None,
@@ -143,6 +162,11 @@ impl ServiceClassProvider for MoveServiceProvider {
         let retrieve_requests = match build_retrieve_requests(&request, &identifier) {
             Ok(requests) => requests,
             Err(error) => {
+                log_move_completed(
+                    started_at,
+                    CMoveStatus::IdentifierDoesNotMatchSopClass,
+                    MoveResponseCounts::final_error(),
+                );
                 return send_move_response(
                     ctx,
                     &request,
@@ -158,13 +182,20 @@ impl ServiceClassProvider for MoveServiceProvider {
 
         let mut results = Vec::new();
         for retrieve_request in retrieve_requests {
-            match self.retrieve.retrieve(retrieve_request).await {
+            match self
+                .retrieve
+                .retrieve(retrieve_request)
+                .instrument(tracing::info_span!("dimse.cmove.retrieve_service"))
+                .await
+            {
                 Ok(result) => results.push(result),
                 Err(error) => {
+                    let status = retrieve_error_status(&error);
+                    log_move_completed(started_at, status, MoveResponseCounts::final_error());
                     return send_move_response(
                         ctx,
                         &request,
-                        retrieve_error_status(&error),
+                        status,
                         MoveResponseCounts::final_error(),
                         Some(error.to_string()),
                         None,
@@ -202,6 +233,10 @@ impl ServiceClassProvider for MoveServiceProvider {
                                 priority: request.priority,
                                 instance,
                             })
+                            .instrument(tracing::info_span!(
+                                "dimse.cmove.destination_store",
+                                dicom.sop_instance_uid = sop_instance_uid.as_str(),
+                            ))
                             .await
                         {
                             Ok(MoveStoreOutcome::Success) => {
@@ -256,6 +291,16 @@ impl ServiceClassProvider for MoveServiceProvider {
         } else {
             Some(failed_sop_instance_uid_list(&failed_sop_instance_uids))
         };
+        log_move_completed(
+            started_at,
+            status,
+            MoveResponseCounts {
+                remaining: None,
+                completed,
+                failed,
+                warning,
+            },
+        );
         send_move_response(
             ctx,
             &request,
@@ -271,6 +316,18 @@ impl ServiceClassProvider for MoveServiceProvider {
         )
         .await
     }
+}
+
+fn log_move_completed(started_at: Instant, status: CMoveStatus, counts: MoveResponseCounts) {
+    tracing::info!(
+        dimse.operation = "C-MOVE",
+        dimse.cmove.status = format!("0x{:04X}", status.code()),
+        dimse.cmove.completed = counts.completed,
+        dimse.cmove.failed = counts.failed,
+        dimse.cmove.warning = counts.warning,
+        service.duration_ms = elapsed_ms(started_at),
+        "DIMSE C-MOVE completed"
+    );
 }
 
 impl DescribedServiceClassProvider for MoveServiceProvider {
@@ -341,6 +398,10 @@ impl MoveResponseCounts {
 fn next_message_id(message_id: u16) -> u16 {
     let next = message_id.wrapping_add(1);
     if next == 0 { 1 } else { next }
+}
+
+fn elapsed_ms(started_at: Instant) -> u64 {
+    u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
 fn failed_sop_instance_uid_list(sop_instance_uids: &[String]) -> InMemDicomObject {

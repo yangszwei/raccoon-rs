@@ -4,6 +4,7 @@ mod dcmtk;
 mod fixture;
 mod harness;
 
+use std::env;
 use std::sync::{Mutex, OnceLock};
 
 use harness::DimseEndpoint;
@@ -18,6 +19,12 @@ fn c_store_baseline_e2e() {
 #[ignore = "requires DCMTK, loopback ports, and DICOM_FILE"]
 fn c_store_association_and_transfer_e2e() {
     serial(run_store_association_and_transfer_parameters);
+}
+
+#[test]
+#[ignore = "requires DCMTK, loopback ports, and DICOM_FILE"]
+fn c_store_batch_benchmark_e2e() {
+    serial(run_store_batch_benchmark);
 }
 
 #[test]
@@ -94,6 +101,15 @@ pub fn run_store_baseline() {
 pub fn run_store_association_and_transfer_parameters() {
     let ctx = harness::RaccoonDimseTestContext::start();
     cases::store::association_and_transfer_parameters(&ctx);
+}
+
+pub fn run_store_batch_benchmark() {
+    let ctx = harness::RaccoonDimseTestContext::start();
+    let batch_size = env::var("C_STORE_BATCH_SIZE")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(10);
+    cases::store::batch_store_benchmark(&ctx, batch_size);
 }
 
 pub fn run_find_patient_root_levels() {
