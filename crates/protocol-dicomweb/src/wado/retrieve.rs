@@ -11,7 +11,7 @@ use raccoon_service_retrieve::{
     RetrieveError, RetrieveRequest, RetrieveResult, RetrieveScope, RetrieveService,
     RetrievedInstance,
 };
-use tracing::Span;
+use tracing::{Instrument, Span, info_span};
 
 use crate::instrumentation::record_error;
 use crate::media::{
@@ -131,6 +131,7 @@ pub(crate) async fn retrieve_result(
 ) -> Result<RetrieveResult, DicomWebError> {
     let result = retrieve
         .retrieve(RetrieveRequest::new(scope))
+        .instrument(info_span!("wado.retrieve.service_call"))
         .await
         .map_err(|error| DicomWebError::Internal(format!("retrieve failed: {error}")))?;
     if result.instance_count == 0 {
@@ -215,7 +216,14 @@ pub(crate) async fn single_instance_response(
         },
     );
     Ok((
-        [(header::CONTENT_TYPE, header_value(&content_type)?)],
+        [
+            (header::CONTENT_TYPE, header_value(&content_type)?),
+            (
+                header::CONTENT_LENGTH,
+                HeaderValue::from_str(&instance.content_length.to_string())
+                    .expect("content length is a valid header value"),
+            ),
+        ],
         Body::from_stream(instance.body.into_stream().map(|chunk| {
             chunk.map_err(|error| DicomWebError::Internal(format!("object stream failed: {error}")))
         })),
@@ -388,18 +396,13 @@ async fn next_multipart_chunk(
 }
 
 fn begin_multipart_part(state: &mut MultipartBodyState, instance: RetrievedInstance) {
-    state
-        .pending
-        .push_back(Bytes::from(format!("--{}\r\n", state.boundary)));
-    state.pending.push_back(Bytes::from(part_content_type(
-        instance.transfer_syntax_uid.as_ref(),
-    )));
-    state.pending.push_back(Bytes::from_static(b"\r\n"));
-    state.pending.push_back(Bytes::from(content_location(
-        &instance.identity,
-        state.base.as_ref(),
-    )));
-    state.pending.push_back(Bytes::from_static(b"\r\n\r\n"));
+    let part_header = format!(
+        "--{}\r\n{}\r\n{}\r\n\r\n",
+        state.boundary,
+        part_content_type(instance.transfer_syntax_uid.as_ref()),
+        content_location(&instance.identity, state.base.as_ref()),
+    );
+    state.pending.push_back(Bytes::from(part_header));
     state.current_body = Some(instance.body.into_stream());
 }
 

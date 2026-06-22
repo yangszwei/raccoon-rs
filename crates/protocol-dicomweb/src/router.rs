@@ -1,9 +1,6 @@
-use std::time::Instant;
-
-use axum::extract::{Request, State};
+use axum::extract::State;
 use axum::http::{HeaderMap, HeaderValue, StatusCode, Uri, header};
-use axum::middleware::{Next, from_fn};
-use axum::response::{IntoResponse, Response};
+use axum::response::IntoResponse;
 use axum::routing::{MethodRouter, options};
 use axum::{Json, Router};
 use tracing::Instrument;
@@ -58,9 +55,6 @@ pub struct RouteTelemetry {
     pub route: &'static str,
 }
 
-#[derive(Debug, Clone, Copy)]
-struct DicomWebServiceName(&'static str);
-
 impl RouteTelemetry {
     pub const fn new(service: &'static str, resource: &'static str, route: &'static str) -> Self {
         Self {
@@ -105,11 +99,8 @@ impl DicomWebRouteRegistry {
         &mut self,
         path: &'static str,
         method_router: MethodRouter<DicomWebState>,
-        telemetry: RouteTelemetry,
+        _telemetry: RouteTelemetry,
     ) {
-        let method_router = method_router.layer(from_fn(move |request, next| {
-            record_dicomweb_completion(request, next, telemetry)
-        }));
         self.routes = std::mem::take(&mut self.routes).route(path, method_router);
     }
 
@@ -119,65 +110,15 @@ impl DicomWebRouteRegistry {
 
     pub fn into_router(self) -> Router {
         Router::new()
-            .route(
-                "/",
-                options(options_root).layer(from_fn(|request, next| {
-                    record_dicomweb_completion(
-                        request,
-                        next,
-                        RouteTelemetry::new("capabilities", "capabilities", "OPTIONS /"),
-                    )
-                })),
-            )
+            .route("/", options(options_root))
             .merge(self.routes)
             .with_state(self.state)
     }
 }
 
-/// Add DICOMweb service identity for protocol-owned request completion logs.
-pub fn log_dicomweb_requests(service_name: &'static str, router: Router) -> Router {
-    router.layer(from_fn(
-        move |mut request: Request, next: Next| async move {
-            request
-                .extensions_mut()
-                .insert(DicomWebServiceName(service_name));
-            next.run(request).await
-        },
-    ))
-}
-
-async fn record_dicomweb_completion(
-    request: Request,
-    next: Next,
-    telemetry: RouteTelemetry,
-) -> Response {
-    let service_name = request
-        .extensions()
-        .get::<DicomWebServiceName>()
-        .map(|name| name.0)
-        .unwrap_or("dicomweb");
-    let method = request.method().clone();
-    let path = request.uri().path().to_string();
-    let started_at = Instant::now();
-
-    let response = next.run(request).await;
-    let status = response.status();
-    let elapsed_ms = u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
-
-    tracing::info!(
-        service.name = service_name,
-        dicomweb.service = telemetry.service,
-        dicomweb.resource = telemetry.resource,
-        dicomweb.transport = "HTTP",
-        http.request.method = %method,
-        http.route = telemetry.route,
-        url.path = path,
-        http.response.status_code = status.as_u16(),
-        dicomweb.duration_ms = elapsed_ms,
-        "DICOMweb response sent"
-    );
-
-    response
+/// Retained for gateway builders; request completion logging is owned by orchestration HTTP middleware.
+pub fn log_dicomweb_requests(_service_name: &'static str, router: Router) -> Router {
+    router
 }
 
 async fn options_root(
@@ -522,7 +463,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn route_completion_records_dicomweb_event() {
+    async fn route_completion_is_owned_by_outer_http_middleware() {
         let records = Arc::new(Mutex::new(Vec::new()));
         let subscriber = tracing_subscriber::registry().with(CaptureLayer {
             records: records.clone(),
@@ -550,24 +491,9 @@ mod tests {
 
         let records = records.lock().expect("records lock").join("\n");
         assert!(
-            records.contains("message=DICOMweb response sent"),
+            !records.contains("message=DICOMweb response sent"),
             "{records}"
         );
-        assert!(
-            records.contains("service.name=dicomweb-gateway"),
-            "{records}"
-        );
-        assert!(records.contains("dicomweb.service=QIDO-RS"), "{records}");
-        assert!(records.contains("dicomweb.resource=studies"), "{records}");
-        assert!(records.contains("dicomweb.transport=HTTP"), "{records}");
-        assert!(records.contains("http.request.method=GET"), "{records}");
-        assert!(records.contains("http.route=/studies"), "{records}");
-        assert!(records.contains("url.path=/studies"), "{records}");
-        assert!(
-            records.contains("http.response.status_code=202"),
-            "{records}"
-        );
-        assert!(records.contains("dicomweb.duration_ms="), "{records}");
     }
 
     async fn options_root_payload(builder: DicomWebRouter) -> Value {
