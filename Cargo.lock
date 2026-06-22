@@ -1876,6 +1876,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "raccoon-adapter-ingest-repository-postgres"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "raccoon-contract-object-store",
+ "raccoon-service-ingest",
+ "raccoon-service-sync",
+ "sqlx",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "raccoon-adapter-ingest-repository-sqlite"
 version = "0.1.0"
 dependencies = [
@@ -2647,6 +2662,7 @@ dependencies = [
  "tokio-stream",
  "tracing",
  "url",
+ "uuid",
 ]
 
 [[package]]
@@ -2712,6 +2728,7 @@ dependencies = [
  "sqlx-core",
  "thiserror",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -2746,6 +2763,7 @@ dependencies = [
  "stringprep",
  "thiserror",
  "tracing",
+ "uuid",
  "whoami",
 ]
 
@@ -2771,6 +2789,7 @@ dependencies = [
  "thiserror",
  "tracing",
  "url",
+ "uuid",
 ]
 
 [[package]]
