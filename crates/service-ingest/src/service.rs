@@ -1,11 +1,11 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Instant, SystemTime};
 
 use async_trait::async_trait;
 use raccoon_contract_object_store::{ObjectKey, ObjectStore, PutResult};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
-use tracing::{Instrument, debug_span, instrument, warn};
+use tracing::{Instrument, info_span, instrument, warn};
 
 use crate::acceptance::{DicomIntakeError, parse_dicom_intake_file};
 use crate::staging::StagedIngestBody;
@@ -207,6 +207,7 @@ impl InMemoryIngestService {
         &self,
         requests: impl IntoIterator<Item = IngestRequest>,
     ) -> IngestBatchResult {
+        let started_at = Instant::now();
         let span = tracing::Span::current();
         let requests = requests.into_iter().collect::<Vec<_>>();
         span.record("ingest.object_count", requests.len());
@@ -215,7 +216,21 @@ impl InMemoryIngestService {
         let mut stored_records = Vec::new();
 
         for request in requests {
-            match self.prepare_upload_object(request, true).await {
+            let prepare_span = info_span!(
+                "ingest.service.prepare_object",
+                ingest.object_id = tracing::field::Empty,
+            );
+            if let Some(ingest_object_id) = request.ingest_object_id.as_ref() {
+                prepare_span.record(
+                    "ingest.object_id",
+                    tracing::field::display(ingest_object_id),
+                );
+            }
+            match self
+                .prepare_upload_object(request, true)
+                .instrument(prepare_span)
+                .await
+            {
                 Ok(prepared) => match prepared {
                     PreparedIngestObject::Stored(record) => {
                         stored_records.push(record.clone());
@@ -267,7 +282,7 @@ impl InMemoryIngestService {
             match self
                 .repository
                 .record_received_objects(&stored_records)
-                .instrument(debug_span!(
+                .instrument(info_span!(
                     "ingest_repository.record_received_objects",
                     ingest.object_count = stored_object_count,
                 ))
@@ -290,14 +305,29 @@ impl InMemoryIngestService {
             IngestBatchRepositoryStatus::Recorded
         };
 
-        IngestBatchResult::new(
+        let result = IngestBatchResult::new(
             object_results
                 .first()
                 .map(|result| result.upload_id.clone())
                 .unwrap_or_default(),
             object_results,
             repository_status,
-        )
+        );
+        tracing::info!(
+            ingest.object_count = result.object_results.len(),
+            ingest.stored_object_count = stored_object_count,
+            ingest.rejected_object_count = rejected_object_count,
+            ingest.failed_object_count = failed_object_count,
+            ingest.accepted_bytes = accepted_bytes,
+            ingest.quarantined_bytes = quarantined_bytes,
+            ingest.repository_recorded = matches!(
+                result.repository_status,
+                IngestBatchRepositoryStatus::Recorded
+            ),
+            service.duration_ms = elapsed_ms(started_at),
+            "Ingest batch completed"
+        );
+        result
     }
 
     async fn prepare_upload_object(
@@ -356,6 +386,12 @@ impl InMemoryIngestService {
             self.options.staging_dir(),
             self.options.max_object_size(),
         )
+        .instrument(info_span!(
+            "ingest.staging.write",
+            ingest.object_id = %ingest_object_id,
+            ingest.staging_chunk_count = tracing::field::Empty,
+            ingest.content_length = tracing::field::Empty,
+        ))
         .await
         {
             Ok(staged_body) => staged_body,
@@ -412,6 +448,11 @@ impl InMemoryIngestService {
             transfer_syntax_uid,
             identity_hints.clone(),
         )
+        .instrument(info_span!(
+            "ingest.dicom.parse",
+            ingest.object_id = %ingest_object_id,
+            ingest.payload_representation = %payload_representation.as_str(),
+        ))
         .await
         {
             Ok(parsed) => parsed,
@@ -665,7 +706,7 @@ async fn store_staged_body(
 
     object_store
         .put(object_key.clone(), body)
-        .instrument(debug_span!(
+        .instrument(info_span!(
             "object_store.put",
             ingest.object_id = %ingest_object_id,
             ingest.object_key = %object_key,
@@ -710,6 +751,10 @@ fn received_record(
         outcome: record.outcome,
         received_at: now,
     }
+}
+
+fn elapsed_ms(started_at: Instant) -> u64 {
+    u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
 fn checksum_rejection(

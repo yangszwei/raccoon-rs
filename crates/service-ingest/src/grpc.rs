@@ -2,6 +2,7 @@ use std::convert::{TryFrom, TryInto};
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Instant;
 
 use async_trait::async_trait;
 use futures_util::StreamExt;
@@ -38,6 +39,8 @@ const RPC_SYSTEM_NAME: &str = "grpc";
 const METHOD_STREAM_INGEST: &str = "raccoon.ingest.v1.IngestTransportService/StreamIngest";
 const DEFAULT_MAX_BODY_CHUNK_BYTES: usize = 1 << 20;
 const DEFAULT_MAX_DECODING_MESSAGE_BYTES: usize = DEFAULT_MAX_BODY_CHUNK_BYTES + 1024;
+const MEMORY_SPOOL_THRESHOLD_BYTES: usize = 1 << 20;
+const SPOOL_READ_CHUNK_BYTES: usize = 1 << 20;
 const SPOOL_DIR_NAME: &str = "raccoon-grpc-ingest";
 
 /// gRPC-backed ingest transport client.
@@ -471,6 +474,7 @@ impl IngestTransportService for IngestTransportGrpcService {
         let max_body_chunk_bytes = self.max_body_chunk_bytes;
         let span = Span::current();
         let response_tx_for_errors = response_tx.clone();
+        let started_at = Instant::now();
 
         tokio::spawn(
             async move {
@@ -486,6 +490,17 @@ impl IngestTransportService for IngestTransportGrpcService {
                 } else {
                     record_ok();
                 }
+                let status_code = result
+                    .as_ref()
+                    .map(|_| tonic::Code::Ok)
+                    .unwrap_or_else(|status| status.code());
+                tracing::info!(
+                    rpc.system.name = RPC_SYSTEM_NAME,
+                    rpc.method = METHOD_STREAM_INGEST,
+                    rpc.response.status_code = ?status_code,
+                    service.duration_ms = elapsed_ms(started_at),
+                    "Ingest gRPC stream completed"
+                );
 
                 if let Err(status) = result {
                     let _ = response_tx_for_errors.send(Err(status)).await;
@@ -618,8 +633,15 @@ where
                         ));
                     }
                 };
+                let spool_span = tracing::info_span!(
+                    "ingest.grpc.spool_object",
+                    ingest.grpc_spool_mode = tracing::field::Empty,
+                    ingest.grpc_spool_chunk_count = tracing::field::Empty,
+                    ingest.grpc_spool_bytes = tracing::field::Empty,
+                );
                 let (request, spool_path) = match active
                     .into_ingest_request(session.upload_id.clone(), session.source.clone())
+                    .instrument(spool_span)
                     .await
                 {
                     Ok(request) => request,
@@ -629,7 +651,9 @@ where
                     }
                 };
                 session.requests.push(request);
-                session.spooled_paths.push(spool_path);
+                if let Some(spool_path) = spool_path {
+                    session.spooled_paths.push(spool_path);
+                }
             }
             proto::ingest_transport_request::Message::SessionEnd(_) => {
                 let mut session = match session.take() {
@@ -797,100 +821,167 @@ impl TryFrom<proto::IngestSessionBegin> for SessionState {
 #[derive(Debug)]
 struct ActiveObject {
     begin: ObjectBeginState,
-    path: PathBuf,
-    file: tokio::fs::File,
+    body: ActiveBody,
+    content_length: u64,
+    chunk_count: u64,
+}
+
+#[derive(Debug)]
+enum ActiveBody {
+    Memory(Vec<u8>),
+    File {
+        path: PathBuf,
+        file: tokio::fs::File,
+    },
 }
 
 impl ActiveObject {
     async fn new(begin: ObjectBeginState) -> Result<Self, Status> {
-        let spool_dir = std::env::temp_dir().join(SPOOL_DIR_NAME);
-        tokio::fs::create_dir_all(&spool_dir)
-            .await
-            .map_err(|source| {
-                Status::internal(format!(
-                    "failed to create gRPC ingest spool directory: {source}"
-                ))
-            })?;
-
-        for _ in 0..16 {
-            let path = spool_dir.join(format!("{}.part", uuid::Uuid::now_v7()));
-            match tokio::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&path)
-                .await
-            {
-                Ok(file) => return Ok(Self { begin, path, file }),
-                Err(source) if source.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                Err(source) => {
-                    return Err(Status::internal(format!(
-                        "failed to create gRPC ingest spool file: {source}"
-                    )));
-                }
-            }
-        }
-
-        Err(Status::internal(
-            "failed to create unique gRPC ingest spool file",
-        ))
+        Ok(Self {
+            begin,
+            body: ActiveBody::Memory(Vec::new()),
+            content_length: 0,
+            chunk_count: 0,
+        })
     }
 
     async fn write_chunk(&mut self, chunk: Vec<u8>) -> Result<(), Status> {
-        self.file.write_all(&chunk).await.map_err(|source| {
-            Status::internal(format!("failed to write gRPC ingest body: {source}"))
-        })
+        self.content_length = self.content_length.saturating_add(chunk.len() as u64);
+        self.chunk_count = self.chunk_count.saturating_add(1);
+        match &mut self.body {
+            ActiveBody::Memory(buffer)
+                if buffer.len().saturating_add(chunk.len()) <= MEMORY_SPOOL_THRESHOLD_BYTES =>
+            {
+                buffer.extend_from_slice(&chunk);
+                Ok(())
+            }
+            ActiveBody::Memory(buffer) => {
+                let (path, mut file) = create_grpc_spool_file().await?;
+                file.write_all(buffer).await.map_err(|source| {
+                    Status::internal(format!("failed to write gRPC ingest body: {source}"))
+                })?;
+                buffer.clear();
+                file.write_all(&chunk).await.map_err(|source| {
+                    Status::internal(format!("failed to write gRPC ingest body: {source}"))
+                })?;
+                self.body = ActiveBody::File { path, file };
+                Ok(())
+            }
+            ActiveBody::File { file, .. } => file.write_all(&chunk).await.map_err(|source| {
+                Status::internal(format!("failed to write gRPC ingest body: {source}"))
+            }),
+        }
     }
 
     async fn into_ingest_request(
         self,
         upload_id: IngestUploadId,
         source: IngestSource,
-    ) -> Result<(IngestRequest, PathBuf), Status> {
-        if let Err(source) = self.file.sync_all().await {
-            let Self { path, file, .. } = self;
-            drop(file);
-            let _ = std::fs::remove_file(path);
-            return Err(Status::internal(format!(
-                "failed to sync gRPC ingest body: {source}"
-            )));
-        }
-        drop(self.file);
+    ) -> Result<(IngestRequest, Option<PathBuf>), Status> {
+        let Self {
+            begin,
+            body,
+            content_length,
+            chunk_count,
+        } = self;
+        let spool_mode = match &body {
+            ActiveBody::Memory(_) => "memory",
+            ActiveBody::File { .. } => "file",
+        };
+        let span = Span::current();
+        span.record("ingest.grpc_spool_mode", spool_mode);
+        span.record("ingest.grpc_spool_chunk_count", chunk_count);
+        span.record("ingest.grpc_spool_bytes", content_length);
 
-        let file = match tokio::fs::File::open(&self.path).await {
-            Ok(file) => file,
-            Err(source) => {
-                let _ = std::fs::remove_file(self.path);
-                return Err(Status::internal(format!(
-                    "failed to read gRPC ingest body: {source}"
-                )));
+        let (body, spool_path) = match body {
+            ActiveBody::Memory(bytes) => {
+                (raccoon_contract_object_store::ByteStream::from(bytes), None)
+            }
+            ActiveBody::File { path, file } => {
+                drop(file);
+                let file = match tokio::fs::File::open(&path).await {
+                    Ok(file) => file,
+                    Err(source) => {
+                        let _ = std::fs::remove_file(path);
+                        return Err(Status::internal(format!(
+                            "failed to read gRPC ingest body: {source}"
+                        )));
+                    }
+                };
+                let body_stream =
+                    tokio_util::io::ReaderStream::with_capacity(file, SPOOL_READ_CHUNK_BYTES).map(
+                        |result| {
+                            result.map_err(|source| {
+                                ObjectStoreError::backend_with_source(
+                                    "failed to read gRPC ingest body",
+                                    source,
+                                )
+                            })
+                        },
+                    );
+                (
+                    raccoon_contract_object_store::ByteStream::new(body_stream),
+                    Some(path),
+                )
             }
         };
-        let body_stream = tokio_util::io::ReaderStream::new(file).map(|result| {
-            result.map_err(|source| {
-                ObjectStoreError::backend_with_source("failed to read gRPC ingest body", source)
-            })
-        });
-        let body = raccoon_contract_object_store::ByteStream::new(body_stream);
-        let path = self.path;
         let request = IngestRequest {
             body,
             upload_id,
-            ingest_object_id: self.begin.ingest_object_id,
-            identity_hints: self.begin.identity_hints,
+            ingest_object_id: begin.ingest_object_id,
+            identity_hints: begin.identity_hints,
             source,
-            payload_representation: self.begin.payload_representation,
-            transfer_syntax_uid: self.begin.transfer_syntax_uid,
-            expected_study_instance_uid: self.begin.expected_study_instance_uid,
-            checksum: self.begin.checksum,
+            payload_representation: begin.payload_representation,
+            transfer_syntax_uid: begin.transfer_syntax_uid,
+            expected_study_instance_uid: begin.expected_study_instance_uid,
+            checksum: begin.checksum,
         };
-        Ok((request, path))
+        Ok((request, spool_path))
     }
 
     fn cleanup(self) {
-        let Self { path, file, .. } = self;
-        drop(file);
-        let _ = std::fs::remove_file(path);
+        if let ActiveBody::File { path, file } = self.body {
+            drop(file);
+            let _ = std::fs::remove_file(path);
+        }
     }
+}
+
+async fn create_grpc_spool_file() -> Result<(PathBuf, tokio::fs::File), Status> {
+    let spool_dir = std::env::temp_dir().join(SPOOL_DIR_NAME);
+    tokio::fs::create_dir_all(&spool_dir)
+        .await
+        .map_err(|source| {
+            Status::internal(format!(
+                "failed to create gRPC ingest spool directory: {source}"
+            ))
+        })?;
+
+    for _ in 0..16 {
+        let path = spool_dir.join(format!("{}.part", uuid::Uuid::now_v7()));
+        match tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .await
+        {
+            Ok(file) => return Ok((path, file)),
+            Err(source) if source.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(source) => {
+                return Err(Status::internal(format!(
+                    "failed to create gRPC ingest spool file: {source}"
+                )));
+            }
+        }
+    }
+
+    Err(Status::internal(
+        "failed to create unique gRPC ingest spool file",
+    ))
+}
+
+fn elapsed_ms(started_at: Instant) -> u64 {
+    u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
 #[derive(Clone, Debug)]

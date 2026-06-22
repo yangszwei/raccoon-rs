@@ -1,9 +1,10 @@
 use std::sync::Arc;
+use std::time::Instant;
 
 use async_trait::async_trait;
 use futures_util::{StreamExt, stream};
 use raccoon_contract_object_store::ObjectStore;
-use tracing::instrument;
+use tracing::{Instrument, info_span, instrument};
 
 use crate::error::{RetrieveError, RetrieveRepositoryError};
 use crate::model::{InstanceRef, RetrieveResult, RetrievedInstance};
@@ -57,7 +58,13 @@ impl RetrieveService for StandardRetrieveService {
         )
     )]
     async fn retrieve(&self, request: RetrieveRequest) -> Result<RetrieveResult, RetrieveError> {
-        let refs = resolve_scope(self.repository.as_ref(), &request.scope).await?;
+        let started_at = Instant::now();
+        let refs = resolve_scope(self.repository.as_ref(), &request.scope)
+            .instrument(info_span!(
+                "retrieve.service.repository",
+                retrieve.scope = request.scope.label(),
+            ))
+            .await?;
         let instance_count = refs.len();
         let total_content_length = refs.iter().try_fold(0u64, |sum, r| {
             r.content_length.and_then(|len| sum.checked_add(len))
@@ -67,6 +74,13 @@ impl RetrieveService for StandardRetrieveService {
         if let Some(total) = total_content_length {
             span.record("retrieve.total_content_length", total);
         }
+        tracing::info!(
+            retrieve.scope = request.scope.label(),
+            retrieve.instance_count = instance_count,
+            retrieve.total_content_length = total_content_length,
+            service.duration_ms = elapsed_ms(started_at),
+            "Retrieve service completed"
+        );
         let object_store = Arc::clone(&self.object_store);
         Ok(RetrieveResult {
             instance_count,
@@ -77,6 +91,11 @@ impl RetrieveService for StandardRetrieveService {
                     let sop_instance_uid = ref_.identity.sop_instance_uid.clone();
                     store
                         .get(&ref_.object_key)
+                        .instrument(info_span!(
+                            "object_store.get",
+                            dicom.sop_instance_uid = sop_instance_uid.as_str(),
+                            object.key = ref_.object_key.as_str(),
+                        ))
                         .await
                         .map(|obj| RetrievedInstance {
                             identity: ref_.identity,
@@ -92,6 +111,10 @@ impl RetrieveService for StandardRetrieveService {
             })),
         })
     }
+}
+
+fn elapsed_ms(started_at: Instant) -> u64 {
+    u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
 async fn resolve_scope(

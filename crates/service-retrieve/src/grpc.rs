@@ -39,7 +39,8 @@ const METHOD_RETRIEVE: &str = "raccoon.retrieve.v1.DicomRetrieveService/Retrieve
 
 const DEFAULT_MAX_BODY_CHUNK_BYTES: usize = 1 << 20;
 const DEFAULT_MAX_DECODING_MESSAGE_BYTES: usize = DEFAULT_MAX_BODY_CHUNK_BYTES + 1024;
-const BODY_CHANNEL_CAPACITY: usize = 4;
+const BODY_CHANNEL_CAPACITY: usize = 16;
+const RESPONSE_CHANNEL_CAPACITY: usize = 16;
 
 enum ClientStreamState {
     BetweenInstances,
@@ -127,9 +128,19 @@ where
             .clone()
             .max_decoding_message_size(self.max_decoding_message_bytes);
 
-        let proto_request = request_with_trace_context(proto::RetrieveRequest::from(request));
+        let proto_request = {
+            let span = tracing::info_span!("retrieve.grpc.client.encode_request");
+            let _guard = span.enter();
+            request_with_trace_context(proto::RetrieveRequest::from(request))
+        };
         let response_stream = client
             .retrieve(proto_request)
+            .instrument(tracing::info_span!(
+                "retrieve.grpc.client.call",
+                rpc.system.name = RPC_SYSTEM_NAME,
+                rpc.service = RPC_SERVICE_RETRIEVE,
+                rpc.method = RPC_METHOD_RETRIEVE,
+            ))
             .await
             .map_err(grpc_status_to_retrieve_err)?
             .into_inner();
@@ -139,15 +150,17 @@ where
         let (instance_tx, instance_rx) =
             mpsc::channel::<Result<RetrievedInstance, RetrieveError>>(1);
 
-        tokio::spawn(drive_retrieve_stream(
-            response_stream,
-            header_tx,
-            instance_tx,
-        ));
+        tokio::spawn(
+            drive_retrieve_stream(response_stream, header_tx, instance_tx)
+                .instrument(tracing::info_span!("retrieve.grpc.client.stream_driver")),
+        );
 
-        let (instance_count, total_content_length) = header_rx.await.map_err(|_| {
-            protocol_error("retrieve stream driver stopped before sending header")
-        })??;
+        let (instance_count, total_content_length) = header_rx
+            .instrument(tracing::info_span!("retrieve.grpc.client.header"))
+            .await
+            .map_err(|_| {
+                protocol_error("retrieve stream driver stopped before sending header")
+            })??;
 
         record_ok();
         Ok(RetrieveResult {
@@ -436,7 +449,7 @@ impl DicomRetrieveService for RetrieveGrpcService {
                 .map_err(|e| record_error(retrieve_error_to_status(e)))?;
 
             let (response_tx, response_rx) =
-                mpsc::channel::<Result<proto::RetrieveResponse, Status>>(8);
+                mpsc::channel::<Result<proto::RetrieveResponse, Status>>(RESPONSE_CHANNEL_CAPACITY);
             let max_chunk_bytes = self.max_body_chunk_bytes;
             let span = Span::current();
 

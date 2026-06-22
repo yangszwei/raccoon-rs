@@ -8,6 +8,8 @@ use tokio_util::io::ReaderStream;
 
 use crate::error::map_io_error_with_message;
 
+const FILE_READ_CHUNK_BYTES: usize = 1 << 20;
+
 pub(crate) async fn write_body(file: &mut File, body: ByteStream) -> Result<()> {
     let mut stream = body.into_stream();
 
@@ -28,7 +30,7 @@ pub(crate) struct FileByteStream {
 impl FileByteStream {
     pub(crate) fn new(file: File) -> Self {
         Self {
-            inner: ReaderStream::new(file),
+            inner: ReaderStream::with_capacity(file, FILE_READ_CHUNK_BYTES),
         }
     }
 }

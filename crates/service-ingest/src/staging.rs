@@ -10,6 +10,8 @@ use tokio_util::io::ReaderStream;
 
 use crate::{IngestError, IngestObjectId};
 
+const STAGED_READ_CHUNK_BYTES: usize = 1 << 20;
+
 pub(crate) struct StagedIngestBody {
     path: PathBuf,
     pub(crate) content_length: u64,
@@ -43,6 +45,7 @@ impl StagedIngestBody {
             let mut content_length = 0_u64;
             let mut hasher = Sha256::new();
             let mut stream = body.into_stream();
+            let mut chunk_count = 0_u64;
             while let Some(chunk) =
                 stream
                     .try_next()
@@ -56,6 +59,7 @@ impl StagedIngestBody {
                         ),
                     })?
             {
+                chunk_count = chunk_count.saturating_add(1);
                 let next_content_length = content_length + chunk.len() as u64;
                 if let Some(max_content_length) = max_object_size
                     && next_content_length > max_content_length
@@ -79,16 +83,9 @@ impl StagedIngestBody {
                         ),
                     })?;
             }
-            file.sync_all()
-                .await
-                .map_err(|source| IngestError::ObjectStore {
-                    ingest_object_id,
-                    object_key: error_object_key,
-                    source: ObjectStoreError::backend_with_source(
-                        "failed to sync ingest staging file",
-                        source,
-                    ),
-                })?;
+            let span = tracing::Span::current();
+            span.record("ingest.staging_chunk_count", chunk_count);
+            span.record("ingest.content_length", content_length);
             Ok((content_length, hex_lower(&hasher.finalize())))
         }
         .await;
@@ -123,7 +120,7 @@ impl StagedIngestBody {
             )
         })?;
         Ok(ByteStream::new(FileByteStream {
-            inner: ReaderStream::new(file),
+            inner: ReaderStream::with_capacity(file, STAGED_READ_CHUNK_BYTES),
         }))
     }
 }

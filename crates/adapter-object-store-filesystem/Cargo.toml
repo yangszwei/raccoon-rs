@@ -8,6 +8,7 @@ async-trait = "0.1.89"
 raccoon-contract-object-store = { path = "../contract-object-store" }
 tokio = { version = "1.52.3", features = ["fs", "io-util"] }
 tokio-util = { version = "0.7.18", features = ["io"] }
+tracing.workspace = true
 
 [dev-dependencies]
 tempfile = "3.23.0"

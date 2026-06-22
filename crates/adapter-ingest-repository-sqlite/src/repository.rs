@@ -15,7 +15,7 @@ use sqlx::{
     Row, SqlitePool,
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous},
 };
-use tracing::{Span, instrument};
+use tracing::{Instrument, Span, info_span, instrument};
 
 use crate::error::{SqliteError, SqliteIngestRepositoryError, error_kind};
 
@@ -188,13 +188,30 @@ impl SqliteIngestRepository {
         &self,
         records: &[ReceivedIngestObject],
     ) -> Result<(), SqliteError> {
-        let mut tx = self.pool.begin().await.map_err(SqliteError::Sqlx)?;
+        let mut tx = self
+            .pool
+            .begin()
+            .instrument(info_span!("sqlite.ingest.begin_transaction"))
+            .await
+            .map_err(SqliteError::Sqlx)?;
 
-        for record in records {
-            insert_record(&mut tx, record).await?;
+        async {
+            for record in records {
+                insert_record(&mut tx, record).await?;
+            }
+            Ok::<(), SqliteError>(())
         }
+        .instrument(info_span!(
+            "sqlite.ingest.insert_records",
+            ingest.object_count = records.len()
+        ))
+        .await?;
 
-        tx.commit().await.map_err(SqliteError::Sqlx)
+        tx.commit()
+            .instrument(info_span!("sqlite.ingest.commit_transaction"))
+            .await
+            .map_err(SqliteError::Sqlx)?;
+        Ok(())
     }
 
     async fn try_claim_pending_objects(

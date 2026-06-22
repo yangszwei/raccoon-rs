@@ -1,10 +1,10 @@
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use raccoon_contract_object_store::{ByteStream, ObjectKey, ObjectStore};
 use tokio_util::sync::CancellationToken;
-use tracing::{Span, instrument, warn};
+use tracing::{Instrument, Span, info_span, instrument, warn};
 
 use crate::error::{QuarantineError, SyncError, SyncParseError, SyncTerminalObjectError};
 use crate::model::{
@@ -127,8 +127,18 @@ impl SyncObjectParser for DicomSyncParser {
 
 #[async_trait]
 impl SyncService for StandardSyncService {
-    #[instrument(skip(self), fields(sync.worker_id = %worker_id))]
+    #[instrument(
+        skip(self),
+        fields(
+            sync.worker_id = %worker_id,
+            sync.claimed = tracing::field::Empty,
+            sync.synced = tracing::field::Empty,
+            sync.quarantined = tracing::field::Empty,
+            sync.retryable_failures = tracing::field::Empty,
+        )
+    )]
     async fn sync_once(&self, worker_id: SyncWorkerId) -> Result<SyncBatchResult, SyncError> {
+        let started_at = Instant::now();
         let claims = self
             .source_repository
             .claim_pending_objects(
@@ -136,6 +146,11 @@ impl SyncService for StandardSyncService {
                 self.options.batch_size(),
                 self.options.claim_ttl(),
             )
+            .instrument(info_span!(
+                "sync.source_repository.claim_pending_objects",
+                sync.worker_id = %worker_id,
+                sync.batch_size = self.options.batch_size(),
+            ))
             .await
             .map_err(SyncError::SourceRepository)?;
 
@@ -152,6 +167,20 @@ impl SyncService for StandardSyncService {
             }
         }
 
+        let span = Span::current();
+        span.record("sync.claimed", result.claimed);
+        span.record("sync.synced", result.synced);
+        span.record("sync.quarantined", result.quarantined);
+        span.record("sync.retryable_failures", result.retryable_failures);
+        tracing::trace!(
+            sync.worker_id = %worker_id,
+            sync.claimed = result.claimed,
+            sync.synced = result.synced,
+            sync.quarantined = result.quarantined,
+            sync.retryable_failures = result.retryable_failures,
+            service.duration_ms = elapsed_ms(started_at),
+            "Sync batch completed"
+        );
         Ok(result)
     }
 
@@ -196,7 +225,15 @@ impl StandardSyncService {
         )
     )]
     async fn process_claim(&self, claim: ClaimedSyncObject) -> ClaimOutcome {
-        let object = match self.object_store.get(&claim.object_key).await {
+        let object = match self
+            .object_store
+            .get(&claim.object_key)
+            .instrument(info_span!(
+                "object_store.get",
+                sync.object_key = %claim.object_key,
+            ))
+            .await
+        {
             Ok(object) => object,
             Err(error) => {
                 Span::current().record("error.type", "object_store_read");
@@ -216,6 +253,10 @@ impl StandardSyncService {
                 claim.transfer_syntax_uid.clone(),
                 self.options.max_metadata_bytes(),
             )
+            .instrument(info_span!(
+                "sync.parser.parse_object",
+                sync.object_key = %claim.object_key,
+            ))
             .await
         {
             Ok(parsed) => parsed,
@@ -271,12 +312,17 @@ impl StandardSyncService {
         if let Some(transfer_syntax_uid) = &parsed.instance.transfer_syntax_uid {
             span.record("sync.transfer_syntax_uid", transfer_syntax_uid.as_str());
         }
+        let sop_instance_uid = identity.sop_instance_uid.as_str().to_string();
 
         let read_model = read_model_object(parsed, now_unix_ms());
 
         if let Err(error) = self
             .read_model_writer
             .upsert_synced_object(&read_model)
+            .instrument(info_span!(
+                "sync.read_model_writer.upsert_synced_object",
+                sync.sop_instance_uid = sop_instance_uid.as_str(),
+            ))
             .await
         {
             warn!(error = %error, "read model write failed; claim will be retried");
@@ -284,7 +330,15 @@ impl StandardSyncService {
             return ClaimOutcome::Retryable;
         }
 
-        if let Err(error) = self.source_repository.mark_synced(&claim.claim_token).await {
+        if let Err(error) = self
+            .source_repository
+            .mark_synced(&claim.claim_token)
+            .instrument(info_span!(
+                "sync.source_repository.mark_synced",
+                sync.claim_token = %claim.claim_token,
+            ))
+            .await
+        {
             warn!(error = %error, "failed to mark synced; claim will be retried");
             self.release_retryable(&claim).await;
             return ClaimOutcome::Retryable;
@@ -305,6 +359,11 @@ impl StandardSyncService {
             &claim.object_key,
             quarantine_key.clone(),
         )
+        .instrument(info_span!(
+            "sync.quarantine.move_object",
+            sync.object_key = %claim.object_key,
+            sync.quarantine_object_key = %quarantine_key,
+        ))
         .await?;
 
         let record = QuarantineRecord {
@@ -317,7 +376,14 @@ impl StandardSyncService {
             quarantined_at_unix_ms: now_unix_ms(),
         };
 
-        self.quarantine_repository.mark_quarantined(&record).await?;
+        self.quarantine_repository
+            .mark_quarantined(&record)
+            .instrument(info_span!(
+                "sync.quarantine_repository.mark_quarantined",
+                sync.claim_token = %claim.claim_token,
+                sync.quarantine_category = record.category.as_str(),
+            ))
+            .await?;
 
         if let Err(source) = self.object_store.delete(&claim.object_key).await {
             warn!(
@@ -334,11 +400,19 @@ impl StandardSyncService {
         if let Err(error) = self
             .source_repository
             .release_claim(&claim.claim_token)
+            .instrument(info_span!(
+                "sync.source_repository.release_claim",
+                sync.claim_token = %claim.claim_token,
+            ))
             .await
         {
             warn!(error = %error, claim_token = %claim.claim_token, "failed to release sync claim");
         }
     }
+}
+
+fn elapsed_ms(started_at: Instant) -> u64 {
+    u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
 fn parse_error_kind(error: &SyncParseError) -> &'static str {

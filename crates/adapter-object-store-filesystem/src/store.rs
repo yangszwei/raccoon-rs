@@ -94,7 +94,6 @@ impl ObjectStore for FsObjectStore {
         })?;
         self.ensure_safe_parent(&key).await?;
         ensure_destination_replaceable(&path, &key).await?;
-        sync_directory(parent).await?;
 
         let temp_path = create_temp_path(parent);
         let mut temp_file = OpenOptions::new()
@@ -111,10 +110,10 @@ impl ObjectStore for FsObjectStore {
             return Err(err);
         }
 
-        if let Err(err) = temp_file.sync_all().await {
+        if let Err(err) = temp_file.sync_data().await {
             let _ = fs::remove_file(&temp_path).await;
             return Err(map_io_error_with_message(
-                "failed to sync temporary object file",
+                "failed to sync temporary object file data",
                 err,
                 None,
             ));
