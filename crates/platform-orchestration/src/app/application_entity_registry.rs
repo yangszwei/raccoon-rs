@@ -9,19 +9,20 @@ use raccoon_service_application_entity_registry::{
     InMemoryApplicationEntityRegistry,
 };
 use tokio::sync::mpsc;
-use tokio_stream::wrappers::TcpListenerStream;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
-use tonic::transport::Server;
 
-use crate::app::grpc::{bind_grpc_listener, serving_health_service, start_grpc_server};
+use crate::app::grpc::{
+    GrpcIncoming, bind_grpc_listener, grpc_server_builder, serving_health_service,
+    start_grpc_server,
+};
 use crate::error::OrchestrationError;
 use crate::service::application_entity_registry::build_application_entity_registry;
 
 /// Runnable Application Entity registry gRPC service application.
 pub struct ApplicationEntityRegistryApp {
     local_addr: SocketAddr,
-    incoming: Mutex<Option<TcpListenerStream>>,
+    incoming: Mutex<Option<GrpcIncoming>>,
     registry: Arc<tokio::sync::Mutex<InMemoryApplicationEntityRegistry>>,
 }
 
@@ -82,7 +83,7 @@ impl App for ApplicationEntityRegistryApp {
                 >,
             >()
             .await;
-            Server::builder()
+            grpc_server_builder()
                 .add_service(service)
                 .add_service(health_service)
                 .serve_with_incoming_shutdown(incoming, async move {

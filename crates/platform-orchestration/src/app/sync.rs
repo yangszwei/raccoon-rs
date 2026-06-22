@@ -6,13 +6,14 @@ use raccoon_platform_config::app::SyncServiceConfig;
 use raccoon_platform_runtime::{App, FatalError};
 use raccoon_service_sync::{DicomSyncServiceServer, SyncGrpcService, SyncService, SyncWorkerId};
 use tokio::sync::mpsc;
-use tokio_stream::wrappers::TcpListenerStream;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
-use tonic::transport::Server;
 use tracing::info;
 
-use crate::app::grpc::{bind_grpc_listener, serving_health_service, start_grpc_server};
+use crate::app::grpc::{
+    GrpcIncoming, bind_grpc_listener, grpc_server_builder, serving_health_service,
+    start_grpc_server,
+};
 use crate::component::object_store::{ingest_object_store_root, quarantine_object_store_root};
 use crate::contract::ingest_repository::build_ingest_repository_handles;
 use crate::contract::object_store::build_object_store;
@@ -23,7 +24,7 @@ use crate::service::sync::build_sync_service;
 /// Runnable sync gRPC service application.
 pub struct SyncApp {
     local_addr: SocketAddr,
-    incoming: Mutex<Option<TcpListenerStream>>,
+    incoming: Mutex<Option<GrpcIncoming>>,
     service: Arc<dyn SyncService>,
 }
 
@@ -94,7 +95,7 @@ impl App for SyncApp {
         let server = async move {
             let health_service =
                 serving_health_service::<DicomSyncServiceServer<SyncGrpcService>>().await;
-            Server::builder()
+            grpc_server_builder()
                 .add_service(service)
                 .add_service(health_service)
                 .serve_with_incoming_shutdown(incoming, async move {

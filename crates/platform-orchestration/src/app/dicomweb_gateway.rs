@@ -2,7 +2,6 @@ use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::time::Duration;
 
 use axum::Router;
 use raccoon_platform_config::app::DicomWebGatewayConfig;
@@ -22,6 +21,7 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 use tracing::info;
 
+use crate::app::grpc::grpc_client_endpoint;
 use crate::component::http::{bind_http_listener, mount_base_path, start_http_server};
 use crate::contract::read_repository::build_read_repository_handles;
 use crate::error::OrchestrationError;
@@ -137,20 +137,4 @@ async fn build_grpc_ingest_service(
         inner,
         server_address,
     )))
-}
-
-fn grpc_client_endpoint(
-    config: &GrpcClientConfig,
-) -> Result<tonic::transport::Endpoint, OrchestrationError> {
-    let mut endpoint = tonic::transport::Endpoint::from_shared(config.endpoint.clone())?;
-
-    if let Some(seconds) = config.connect_timeout_seconds {
-        endpoint = endpoint.connect_timeout(Duration::from_secs(seconds));
-    }
-
-    if let Some(seconds) = config.request_timeout_seconds {
-        endpoint = endpoint.timeout(Duration::from_secs(seconds));
-    }
-
-    Ok(endpoint)
 }

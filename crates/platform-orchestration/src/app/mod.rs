@@ -5,7 +5,7 @@ mod dicomweb_gateway;
 #[cfg(feature = "grpc")]
 mod dimse_gateway;
 #[cfg(feature = "grpc")]
-mod grpc;
+pub(crate) mod grpc;
 #[cfg(feature = "grpc")]
 mod ingest;
 mod monolith;

@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::time::Instant;
 
 use async_trait::async_trait;
 use thiserror::Error;
@@ -168,14 +169,34 @@ impl ApplicationEntityRegistryWriter for InMemoryApplicationEntityRegistry {
         &mut self,
         local_ae: LocalApplicationEntity,
     ) -> Result<(), ApplicationEntityRegistryError> {
-        InMemoryApplicationEntityRegistry::insert_local(self, local_ae)
+        let started_at = Instant::now();
+        let title = local_ae.title().clone();
+        let result = InMemoryApplicationEntityRegistry::insert_local(self, local_ae);
+        if result.is_ok() {
+            tracing::info!(
+                ae.title = %title,
+                service.duration_ms = elapsed_ms(started_at),
+                "Application entity registry insert_local completed"
+            );
+        }
+        result
     }
 
     async fn insert_peer(
         &mut self,
         peer_ae: PeerApplicationEntity,
     ) -> Result<(), ApplicationEntityRegistryError> {
-        InMemoryApplicationEntityRegistry::insert_peer(self, peer_ae)
+        let started_at = Instant::now();
+        let title = peer_ae.title().clone();
+        let result = InMemoryApplicationEntityRegistry::insert_peer(self, peer_ae);
+        if result.is_ok() {
+            tracing::info!(
+                ae.title = %title,
+                service.duration_ms = elapsed_ms(started_at),
+                "Application entity registry insert_peer completed"
+            );
+        }
+        result
     }
 }
 
@@ -185,14 +206,28 @@ impl ApplicationEntityRegistry for InMemoryApplicationEntityRegistry {
     async fn list_locals(
         &self,
     ) -> Result<Vec<LocalApplicationEntity>, ApplicationEntityRegistryError> {
-        Ok(self.locals.values().cloned().collect())
+        let started_at = Instant::now();
+        let result = self.locals.values().cloned().collect::<Vec<_>>();
+        tracing::info!(
+            local.count = result.len(),
+            service.duration_ms = elapsed_ms(started_at),
+            "Application entity registry list_locals completed"
+        );
+        Ok(result)
     }
 
     #[instrument(skip(self), fields(peer.count = self.peers.len()))]
     async fn list_peers(
         &self,
     ) -> Result<Vec<PeerApplicationEntity>, ApplicationEntityRegistryError> {
-        Ok(self.peers.values().cloned().collect())
+        let started_at = Instant::now();
+        let result = self.peers.values().cloned().collect::<Vec<_>>();
+        tracing::info!(
+            peer.count = result.len(),
+            service.duration_ms = elapsed_ms(started_at),
+            "Application entity registry list_peers completed"
+        );
+        Ok(result)
     }
 
     #[instrument(skip(self), fields(ae.title = %ae_title))]
@@ -200,7 +235,15 @@ impl ApplicationEntityRegistry for InMemoryApplicationEntityRegistry {
         &self,
         ae_title: &AeTitle,
     ) -> Result<Option<LocalApplicationEntity>, ApplicationEntityRegistryError> {
-        Ok(self.locals.get(ae_title).cloned())
+        let started_at = Instant::now();
+        let result = self.locals.get(ae_title).cloned();
+        tracing::info!(
+            ae.title = %ae_title,
+            ae.found = result.is_some(),
+            service.duration_ms = elapsed_ms(started_at),
+            "Application entity registry get_local completed"
+        );
+        Ok(result)
     }
 
     #[instrument(skip(self), fields(ae.title = %ae_title))]
@@ -208,8 +251,20 @@ impl ApplicationEntityRegistry for InMemoryApplicationEntityRegistry {
         &self,
         ae_title: &AeTitle,
     ) -> Result<Option<PeerApplicationEntity>, ApplicationEntityRegistryError> {
-        Ok(self.peers.get(ae_title).cloned())
+        let started_at = Instant::now();
+        let result = self.peers.get(ae_title).cloned();
+        tracing::info!(
+            ae.title = %ae_title,
+            ae.found = result.is_some(),
+            service.duration_ms = elapsed_ms(started_at),
+            "Application entity registry get_peer completed"
+        );
+        Ok(result)
     }
+}
+
+fn elapsed_ms(started_at: Instant) -> u64 {
+    u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
 #[cfg(test)]

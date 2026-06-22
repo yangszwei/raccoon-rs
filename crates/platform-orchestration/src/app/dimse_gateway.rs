@@ -1,6 +1,5 @@
 use std::convert::Infallible;
 use std::sync::Arc;
-use std::time::Duration;
 
 use raccoon_platform_config::app::DimseGatewayConfig;
 use raccoon_platform_config::component::grpc::GrpcClientConfig;
@@ -21,6 +20,7 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 use tracing::{debug, warn};
 
+use crate::app::grpc::grpc_client_endpoint;
 use crate::error::OrchestrationError;
 use crate::protocol::dimse::{bind_dimse_listener, build_dimse_service_registry};
 use crate::service::application_entity_registry::build_grpc_application_entity_registry_client;
@@ -191,22 +191,6 @@ fn start_dimse_workers(
             }
         });
     }
-}
-
-fn grpc_client_endpoint(
-    config: &GrpcClientConfig,
-) -> Result<tonic::transport::Endpoint, OrchestrationError> {
-    let mut endpoint = tonic::transport::Endpoint::from_shared(config.endpoint.clone())?;
-
-    if let Some(seconds) = config.connect_timeout_seconds {
-        endpoint = endpoint.connect_timeout(Duration::from_secs(seconds));
-    }
-
-    if let Some(seconds) = config.request_timeout_seconds {
-        endpoint = endpoint.timeout(Duration::from_secs(seconds));
-    }
-
-    Ok(endpoint)
 }
 
 #[cfg(test)]

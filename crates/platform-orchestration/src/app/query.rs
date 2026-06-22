@@ -6,12 +6,13 @@ use raccoon_platform_config::app::QueryServiceConfig;
 use raccoon_platform_runtime::{App, FatalError};
 use raccoon_service_query::{DicomQueryServiceServer, QueryGrpcService, QueryService};
 use tokio::sync::mpsc;
-use tokio_stream::wrappers::TcpListenerStream;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
-use tonic::transport::Server;
 
-use crate::app::grpc::{bind_grpc_listener, serving_health_service, start_grpc_server};
+use crate::app::grpc::{
+    GrpcIncoming, bind_grpc_listener, grpc_server_builder, serving_health_service,
+    start_grpc_server,
+};
 use crate::contract::read_repository::build_read_repository_handles;
 use crate::error::OrchestrationError;
 use crate::service::query::build_query_service;
@@ -19,7 +20,7 @@ use crate::service::query::build_query_service;
 /// Runnable query gRPC service application.
 pub struct QueryApp {
     local_addr: SocketAddr,
-    incoming: Mutex<Option<TcpListenerStream>>,
+    incoming: Mutex<Option<GrpcIncoming>>,
     service: Arc<dyn QueryService>,
 }
 
@@ -68,7 +69,7 @@ impl App for QueryApp {
         let server = async move {
             let health_service =
                 serving_health_service::<DicomQueryServiceServer<QueryGrpcService>>().await;
-            Server::builder()
+            grpc_server_builder()
                 .add_service(service)
                 .add_service(health_service)
                 .serve_with_incoming_shutdown(incoming, async move {

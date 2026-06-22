@@ -1,5 +1,5 @@
 #[cfg(feature = "grpc")]
-use std::{net::SocketAddr, time::Duration};
+use std::net::SocketAddr;
 
 use raccoon_platform_config::component::application_entities::{
     ApplicationEntitiesConfig, LocalApplicationEntityConfig, PeerApplicationEntityConfig,
@@ -17,6 +17,8 @@ use raccoon_service_application_entity_registry::{
     GrpcApplicationEntityRegistryClient,
 };
 
+#[cfg(feature = "grpc")]
+use crate::app::grpc::grpc_client_endpoint;
 use crate::error::OrchestrationError;
 
 /// Build the application entity registry from loaded configuration.
@@ -104,21 +106,4 @@ fn map_peer_application_entity(
         config.write_timeout_seconds,
         config.max_pdu_length,
     )
-}
-
-#[cfg(feature = "grpc")]
-fn grpc_client_endpoint(
-    config: &GrpcClientConfig,
-) -> Result<tonic::transport::Endpoint, OrchestrationError> {
-    let mut endpoint = tonic::transport::Endpoint::from_shared(config.endpoint.clone())?;
-
-    if let Some(seconds) = config.connect_timeout_seconds {
-        endpoint = endpoint.connect_timeout(Duration::from_secs(seconds));
-    }
-
-    if let Some(seconds) = config.request_timeout_seconds {
-        endpoint = endpoint.timeout(Duration::from_secs(seconds));
-    }
-
-    Ok(endpoint)
 }
