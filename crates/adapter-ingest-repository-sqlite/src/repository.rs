@@ -508,6 +508,7 @@ async fn insert_record(
             outcome_reason,
             received_at_unix_ms
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(sop_instance_uid) DO NOTHING
         "#,
     )
     .bind(record.ingest_object_id.to_string())

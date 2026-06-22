@@ -219,12 +219,11 @@ async fn duplicate_ingest_object_id_fails_and_rolls_back_batch() {
         .record_received_object(&record(1, "upload/existing.dcm"))
         .await
         .expect("seed record");
+    let mut duplicate_id = record(1, "upload/duplicate-id.dcm");
+    duplicate_id.identity.sop_instance_uid = Some("1.2.3.4.5.999".to_string());
 
     let result = store
-        .record_received_objects(&[
-            record(2, "upload/new.dcm"),
-            record(1, "upload/duplicate-id.dcm"),
-        ])
+        .record_received_objects(&[record(2, "upload/new.dcm"), duplicate_id])
         .await;
 
     assert!(result.is_err());
@@ -263,6 +262,40 @@ async fn duplicate_object_key_fails_and_rolls_back_batch() {
             .await
             .expect("count rolled-back record");
     assert_eq!(rolled_back, 0);
+}
+
+#[tokio::test]
+async fn duplicate_sop_instance_uid_is_ignored_without_rolling_back_batch() {
+    let pool = migrated_pool().await;
+    let store = SqliteIngestRepository::new(pool.clone());
+    store
+        .record_received_object(&record(1, "upload/existing.dcm"))
+        .await
+        .expect("seed record");
+    let mut duplicate = record(1_000, "upload/duplicate-sop.dcm");
+    duplicate.identity.sop_instance_uid = Some("1.2.3.4.5.1".to_string());
+
+    store
+        .record_received_objects(&[record(2, "upload/new.dcm"), duplicate])
+        .await
+        .expect("duplicate SOP Instance UID is ignored");
+
+    assert_eq!(object_count(&pool).await, 2);
+    let duplicate_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM ingest_objects WHERE object_key = ?")
+            .bind("upload/duplicate-sop.dcm")
+            .fetch_one(&pool)
+            .await
+            .expect("count duplicate record");
+    let new_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM ingest_objects WHERE object_key = ?")
+            .bind("upload/new.dcm")
+            .fetch_one(&pool)
+            .await
+            .expect("count new record");
+
+    assert_eq!(duplicate_count, 0);
+    assert_eq!(new_count, 1);
 }
 
 #[tokio::test]

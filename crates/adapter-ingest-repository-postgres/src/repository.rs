@@ -578,6 +578,7 @@ async fn insert_batch(
                 outcome_reason,
                 received_at_unix_ms
             FROM input
+            ON CONFLICT (sop_instance_uid) DO NOTHING
             RETURNING ingest_object_id, outcome_kind, received_at_unix_ms
         )
         INSERT INTO ingest_object_sync_states (

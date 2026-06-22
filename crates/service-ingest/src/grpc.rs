@@ -852,6 +852,13 @@ impl ActiveObject {
             ActiveBody::Memory(buffer)
                 if buffer.len().saturating_add(chunk.len()) <= MEMORY_SPOOL_THRESHOLD_BYTES =>
             {
+                if buffer.capacity() < MEMORY_SPOOL_THRESHOLD_BYTES {
+                    buffer.reserve(
+                        MEMORY_SPOOL_THRESHOLD_BYTES
+                            .saturating_sub(buffer.capacity())
+                            .min(chunk.len()),
+                    );
+                }
                 buffer.extend_from_slice(&chunk);
                 Ok(())
             }
