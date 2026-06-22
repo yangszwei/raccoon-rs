@@ -1,4 +1,5 @@
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use axum::Router;
@@ -17,13 +18,22 @@ use tower::ServiceExt;
 #[derive(Default)]
 struct FakeQueryService {
     requests: Mutex<Vec<DicomQuery>>,
+    revision: Mutex<u64>,
+    increment_revision_on_query: bool,
 }
 
 #[async_trait]
 impl QueryService for FakeQueryService {
     async fn query(&self, request: DicomQuery) -> Result<QueryPage, QueryError> {
         self.requests.lock().unwrap().push(request);
+        if self.increment_revision_on_query {
+            *self.revision.lock().unwrap() += 1;
+        }
         Ok(QueryPage::new(vec![query_match()], 0, 100, Some(1)))
+    }
+
+    async fn read_model_revision(&self) -> Result<u64, QueryError> {
+        Ok(*self.revision.lock().unwrap())
     }
 }
 
@@ -255,6 +265,70 @@ async fn qido_retrieve_url_preserves_mounted_and_proxy_prefixes() {
 }
 
 #[tokio::test]
+async fn qido_caches_exact_scoped_json_lookup() {
+    let query = Arc::new(FakeQueryService::default());
+    let router = router(query.clone());
+
+    for path in [
+        "/studies?StudyInstanceUID=1.2.3",
+        "/studies/1.2.3/series?SeriesInstanceUID=1.2.3.4",
+        "/studies/1.2.3/series/1.2.3.4/instances?SOPInstanceUID=1.2.3.4.5",
+    ] {
+        let response = request(router.clone(), path).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = request(router.clone(), path).await;
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    let requests = query.requests.lock().unwrap();
+    assert_eq!(
+        requests.len(),
+        3,
+        "second exact JSON lookup for each QIDO level should hit cache"
+    );
+}
+
+#[tokio::test]
+async fn qido_invalidates_exact_json_cache_when_read_model_revision_changes() {
+    let query = Arc::new(FakeQueryService::default());
+    let router = strict_cache_router(query.clone());
+    let path = "/studies?StudyInstanceUID=1.2.3";
+
+    assert_eq!(request(router.clone(), path).await.status(), StatusCode::OK);
+    assert_eq!(request(router.clone(), path).await.status(), StatusCode::OK);
+    assert_eq!(query.requests.lock().unwrap().len(), 1);
+
+    *query.revision.lock().unwrap() = 1;
+    assert_eq!(request(router, path).await.status(), StatusCode::OK);
+
+    assert_eq!(
+        query.requests.lock().unwrap().len(),
+        2,
+        "revision change should clear cached QIDO JSON"
+    );
+}
+
+#[tokio::test]
+async fn qido_does_not_cache_miss_when_revision_changes_during_query() {
+    let query = Arc::new(FakeQueryService {
+        increment_revision_on_query: true,
+        ..FakeQueryService::default()
+    });
+    let router = strict_cache_router(query.clone());
+    let path = "/studies?StudyInstanceUID=1.2.3";
+
+    assert_eq!(request(router.clone(), path).await.status(), StatusCode::OK);
+    assert_eq!(request(router, path).await.status(), StatusCode::OK);
+
+    assert_eq!(
+        query.requests.lock().unwrap().len(),
+        2,
+        "misses built across a revision change must not be cached"
+    );
+}
+
+#[tokio::test]
 async fn qido_rejects_malformed_path_uid_and_sequence_matching() {
     let response = request(
         router(Arc::new(FakeQueryService::default())),
@@ -297,6 +371,12 @@ async fn qido_capabilities_advertise_json_and_supported_params() {
 fn router(query: Arc<FakeQueryService>) -> Router {
     DicomWebRouter::new()
         .register(QidoRsProvider::new(query))
+        .into_router()
+}
+
+fn strict_cache_router(query: Arc<FakeQueryService>) -> Router {
+    DicomWebRouter::new()
+        .register(QidoRsProvider::new(query).with_cache_revision_check_interval(Duration::ZERO))
         .into_router()
 }
 

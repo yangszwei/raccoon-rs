@@ -6,6 +6,7 @@ use raccoon_service_query::QueryService;
 use raccoon_service_retrieve::{MetadataRepository, RetrieveService};
 
 use crate::DicomWebFeatureSet;
+use crate::qido::cache::QidoJsonCache;
 use crate::stow::StowRsProviderOptions;
 use crate::wado::{RenderService, TransferSyntaxPolicy};
 
@@ -15,6 +16,7 @@ pub struct DicomWebState {
     pub features: DicomWebFeatureSet,
     pub ingest: Option<Arc<dyn IngestService>>,
     pub query: Option<Arc<dyn QueryService>>,
+    pub(crate) qido_json_cache: QidoJsonCache,
     pub retrieve: Option<Arc<dyn RetrieveService>>,
     pub metadata: Option<Arc<dyn MetadataRepository>>,
     pub wado_rs_transfer_syntax_policy: Option<TransferSyntaxPolicy>,
@@ -31,6 +33,7 @@ impl fmt::Debug for DicomWebState {
             .field("features", &self.features)
             .field("ingest", &self.ingest.as_ref().map(|_| "IngestService"))
             .field("query", &self.query.as_ref().map(|_| "QueryService"))
+            .field("qido_json_cache", &self.qido_json_cache)
             .field(
                 "retrieve",
                 &self.retrieve.as_ref().map(|_| "RetrieveService"),

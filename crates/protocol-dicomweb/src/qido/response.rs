@@ -8,6 +8,7 @@ use raccoon_service_query::{
     AttributePathSegment, AttributeValue, ProjectedAttribute, QueryMatch, ResponseValue,
 };
 use serde_json::Value;
+use tracing::info_span;
 
 use crate::{DicomWebUrlBase, RetrieveUrl};
 
@@ -23,6 +24,11 @@ pub(crate) fn query_page_json(
     url_base: Option<&DicomWebUrlBase>,
     retrieve_url_level: RetrieveUrlLevel,
 ) -> Value {
+    let span = info_span!(
+        "qido.response.serialize_json",
+        qido.item_count = items.len()
+    );
+    let _guard = span.enter();
     let objects: Vec<_> = items
         .into_iter()
         .map(|item| query_match_object_with_retrieve_url(item, url_base, retrieve_url_level))
