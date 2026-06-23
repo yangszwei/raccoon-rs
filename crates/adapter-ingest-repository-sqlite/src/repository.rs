@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use raccoon_contract_object_store::ObjectKey;
 use raccoon_service_ingest::{
     IngestObjectId, IngestObjectOutcome, IngestPayloadRepresentation, IngestRepository,
-    IngestRepositoryError, ReceivedIngestObject,
+    IngestRepositoryError, ReceivedIngestObject, StoredIngestObject,
 };
 use raccoon_service_sync::{
     ClaimedSyncObject, QuarantineRecord, SyncClaimToken, SyncQuarantineRepository,
@@ -84,6 +84,18 @@ fn is_in_memory_url(url: &str) -> bool {
 
 #[async_trait]
 impl IngestRepository for SqliteIngestRepository {
+    async fn find_stored_object_by_sop_instance_uid(
+        &self,
+        sop_instance_uid: &str,
+    ) -> Result<Option<StoredIngestObject>, IngestRepositoryError> {
+        self.try_find_stored_object_by_sop_instance_uid(sop_instance_uid)
+            .await
+            .map_err(|err| {
+                Span::current().record("error.type", error_kind(&err));
+                IngestRepositoryError::with_source("failed to look up stored ingest object", err)
+            })
+    }
+
     #[instrument(
         skip_all,
         fields(
@@ -184,6 +196,45 @@ impl SyncQuarantineRepository for SqliteIngestRepository {
 }
 
 impl SqliteIngestRepository {
+    async fn try_find_stored_object_by_sop_instance_uid(
+        &self,
+        sop_instance_uid: &str,
+    ) -> Result<Option<StoredIngestObject>, SqliteError> {
+        let row = sqlx::query(
+            r#"
+            SELECT object_key, content_length, etag, checksum_algorithm, checksum_value
+            FROM ingest_objects
+            WHERE sop_instance_uid = ?
+              AND outcome_kind = 'stored'
+            LIMIT 1
+            "#,
+        )
+        .bind(sop_instance_uid)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(SqliteError::Sqlx)?;
+
+        let Some(row) = row else {
+            return Ok(None);
+        };
+
+        Ok(Some(StoredIngestObject {
+            object_key: parse_object_key(&row, "object_key")?,
+            content_length: row
+                .try_get::<i64, _>("content_length")
+                .map_err(SqliteError::Sqlx)? as u64,
+            etag: row
+                .try_get::<Option<String>, _>("etag")
+                .map_err(SqliteError::Sqlx)?,
+            checksum_algorithm: row
+                .try_get::<Option<String>, _>("checksum_algorithm")
+                .map_err(SqliteError::Sqlx)?,
+            checksum_value: row
+                .try_get::<Option<String>, _>("checksum_value")
+                .map_err(SqliteError::Sqlx)?,
+        }))
+    }
+
     async fn try_record_received_objects(
         &self,
         records: &[ReceivedIngestObject],
@@ -508,7 +559,23 @@ async fn insert_record(
             outcome_reason,
             received_at_unix_ms
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(sop_instance_uid) DO NOTHING
+        ON CONFLICT(sop_instance_uid) DO UPDATE SET
+            upload_id = excluded.upload_id,
+            object_key = excluded.object_key,
+            content_length = excluded.content_length,
+            etag = excluded.etag,
+            checksum_algorithm = excluded.checksum_algorithm,
+            checksum_value = excluded.checksum_value,
+            sop_class_uid = excluded.sop_class_uid,
+            study_instance_uid = excluded.study_instance_uid,
+            series_instance_uid = excluded.series_instance_uid,
+            payload_representation = excluded.payload_representation,
+            transfer_syntax_uid = excluded.transfer_syntax_uid,
+            source_ae = excluded.source_ae,
+            outcome_kind = excluded.outcome_kind,
+            outcome_reason = excluded.outcome_reason,
+            received_at_unix_ms = excluded.received_at_unix_ms
+        WHERE excluded.outcome_kind = 'stored'
         "#,
     )
     .bind(record.ingest_object_id.to_string())
@@ -531,6 +598,55 @@ async fn insert_record(
     .execute(&mut **tx)
     .await
     .map_err(SqliteError::Sqlx)?;
+
+    if matches!(&record.outcome, IngestObjectOutcome::Stored) {
+        mark_record_pending(tx, record).await?;
+    }
+
+    Ok(())
+}
+
+async fn mark_record_pending(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    record: &ReceivedIngestObject,
+) -> Result<(), SqliteError> {
+    let query = if record.identity.sop_instance_uid.is_some() {
+        sqlx::query(
+            r#"
+            INSERT INTO ingest_object_sync_states (ingest_object_id, sync_state)
+            SELECT ingest_object_id, 'pending'
+            FROM ingest_objects
+            WHERE sop_instance_uid = ?
+            ON CONFLICT(ingest_object_id) DO UPDATE SET
+                sync_state = 'pending',
+                sync_claim_token = NULL,
+                sync_claimed_by = NULL,
+                sync_claim_expires_at_unix_ms = NULL,
+                synced_at_unix_ms = NULL,
+                terminal_at_unix_ms = NULL
+            "#,
+        )
+        .bind(record.identity.sop_instance_uid.as_deref())
+    } else {
+        sqlx::query(
+            r#"
+            INSERT INTO ingest_object_sync_states (ingest_object_id, sync_state)
+            SELECT ingest_object_id, 'pending'
+            FROM ingest_objects
+            WHERE ingest_object_id = ?
+            ON CONFLICT(ingest_object_id) DO UPDATE SET
+                sync_state = 'pending',
+                sync_claim_token = NULL,
+                sync_claimed_by = NULL,
+                sync_claim_expires_at_unix_ms = NULL,
+                synced_at_unix_ms = NULL,
+                terminal_at_unix_ms = NULL
+            "#,
+        )
+        .bind(record.ingest_object_id.to_string())
+    };
+
+    query.execute(&mut **tx).await.map_err(SqliteError::Sqlx)?;
 
     Ok(())
 }

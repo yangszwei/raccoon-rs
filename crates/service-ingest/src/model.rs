@@ -17,6 +17,27 @@ pub struct IngestObjectIdentity {
     pub sop_instance_uid: Option<String>,
 }
 
+/// Canonical stored metadata for an existing SOP Instance UID.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StoredIngestObject {
+    pub object_key: ObjectKey,
+    pub content_length: u64,
+    pub etag: Option<String>,
+    pub checksum_algorithm: Option<String>,
+    pub checksum_value: Option<String>,
+}
+
+impl StoredIngestObject {
+    pub fn checksum(&self) -> Option<IngestChecksum> {
+        let checksum_algorithm = self.checksum_algorithm.as_deref()?;
+        let checksum_value = self.checksum_value.as_deref()?;
+        if !checksum_algorithm.eq_ignore_ascii_case(IngestChecksumAlgorithm::Sha256.as_str()) {
+            return None;
+        }
+        Some(IngestChecksum::sha256(checksum_value.to_string()))
+    }
+}
+
 /// Incoming object representation as observed by the protocol adapter/parser.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum IngestPayloadRepresentation {

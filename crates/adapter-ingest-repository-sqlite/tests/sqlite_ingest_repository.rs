@@ -265,20 +265,30 @@ async fn duplicate_object_key_fails_and_rolls_back_batch() {
 }
 
 #[tokio::test]
-async fn duplicate_sop_instance_uid_is_ignored_without_rolling_back_batch() {
+async fn duplicate_sop_instance_uid_replaces_object_and_requeues_sync() {
     let pool = migrated_pool().await;
     let store = SqliteIngestRepository::new(pool.clone());
     store
         .record_received_object(&record(1, "upload/existing.dcm"))
         .await
         .expect("seed record");
+    let claim = store
+        .claim_pending_objects(&SyncWorkerId::new("worker-1"), 1, Duration::from_secs(30))
+        .await
+        .expect("claim seed")
+        .pop()
+        .expect("seed claim");
+    store
+        .mark_synced(&claim.claim_token)
+        .await
+        .expect("mark seed synced");
     let mut duplicate = record(1_000, "upload/duplicate-sop.dcm");
     duplicate.identity.sop_instance_uid = Some("1.2.3.4.5.1".to_string());
 
     store
         .record_received_objects(&[record(2, "upload/new.dcm"), duplicate])
         .await
-        .expect("duplicate SOP Instance UID is ignored");
+        .expect("duplicate SOP Instance UID replaces stored object");
 
     assert_eq!(object_count(&pool).await, 2);
     let duplicate_count: i64 =
@@ -287,15 +297,33 @@ async fn duplicate_sop_instance_uid_is_ignored_without_rolling_back_batch() {
             .fetch_one(&pool)
             .await
             .expect("count duplicate record");
+    let old_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM ingest_objects WHERE object_key = ?")
+            .bind("upload/existing.dcm")
+            .fetch_one(&pool)
+            .await
+            .expect("count old record");
     let new_count: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM ingest_objects WHERE object_key = ?")
             .bind("upload/new.dcm")
             .fetch_one(&pool)
             .await
             .expect("count new record");
+    let sync_row = sqlx::query(
+        "SELECT sync_state, synced_at_unix_ms, terminal_at_unix_ms \
+         FROM ingest_object_sync_states WHERE ingest_object_id = ?",
+    )
+    .bind(ingest_object_id(1).to_string())
+    .fetch_one(&pool)
+    .await
+    .expect("fetch requeued sync state");
 
-    assert_eq!(duplicate_count, 0);
+    assert_eq!(duplicate_count, 1);
+    assert_eq!(old_count, 0);
     assert_eq!(new_count, 1);
+    assert_eq!(sync_row.get::<String, _>("sync_state"), "pending");
+    assert_eq!(sync_row.get::<Option<i64>, _>("synced_at_unix_ms"), None);
+    assert_eq!(sync_row.get::<Option<i64>, _>("terminal_at_unix_ms"), None);
 }
 
 #[tokio::test]

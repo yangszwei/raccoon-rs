@@ -1523,12 +1523,25 @@ mod tests {
     #[derive(Default)]
     struct FakeRepository {
         records: Mutex<Vec<crate::ReceivedIngestObject>>,
+        stored_objects: Mutex<HashMap<String, crate::StoredIngestObject>>,
         calls: Mutex<usize>,
         failures: Mutex<VecDeque<IngestRepositoryError>>,
     }
 
     #[async_trait]
     impl IngestRepository for FakeRepository {
+        async fn find_stored_object_by_sop_instance_uid(
+            &self,
+            sop_instance_uid: &str,
+        ) -> Result<Option<crate::StoredIngestObject>, IngestRepositoryError> {
+            Ok(self
+                .stored_objects
+                .lock()
+                .unwrap()
+                .get(sop_instance_uid)
+                .cloned())
+        }
+
         async fn record_received_objects(
             &self,
             records: &[crate::ReceivedIngestObject],

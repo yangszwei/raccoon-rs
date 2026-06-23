@@ -34,6 +34,7 @@ pub use model::{
     IngestBatchRepositoryStatus, IngestBatchResult, IngestChecksum, IngestChecksumAlgorithm,
     IngestObjectIdentity, IngestObjectOutcome, IngestObjectState, IngestPayloadRepresentation,
     IngestRequest, IngestResult, IngestSource, IngestUploadResult, ReceivedIngestObject,
+    StoredIngestObject,
 };
 pub use repository::IngestRepository;
 pub use service::{InMemoryIngestService, IngestService, IngestServiceOptions};

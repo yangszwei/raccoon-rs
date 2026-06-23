@@ -83,6 +83,16 @@ impl StagedIngestBody {
                         ),
                     })?;
             }
+            file.flush()
+                .await
+                .map_err(|source| IngestError::ObjectStore {
+                    ingest_object_id: ingest_object_id.clone(),
+                    object_key: error_object_key.clone(),
+                    source: ObjectStoreError::backend_with_source(
+                        "failed to flush ingest staging file",
+                        source,
+                    ),
+                })?;
             let span = tracing::Span::current();
             span.record("ingest.staging_chunk_count", chunk_count);
             span.record("ingest.content_length", content_length);

@@ -11,11 +11,11 @@ use crate::acceptance::{DicomIntakeError, parse_dicom_intake_file};
 use crate::staging::StagedIngestBody;
 use crate::{
     AcceptAllStorageAcceptancePolicy, IngestBatchRepositoryStatus, IngestBatchResult,
-    IngestChecksum, IngestError, IngestObjectId, IngestObjectIdentity, IngestObjectKeyBuilder,
-    IngestObjectOutcome, IngestObjectState, IngestPayloadRepresentation, IngestRepository,
-    IngestRequest, IngestResult, IngestSource, IngestUploadId, ParsedDicomObject,
+    IngestChecksum, IngestChecksumAlgorithm, IngestError, IngestObjectId, IngestObjectIdentity,
+    IngestObjectKeyBuilder, IngestObjectOutcome, IngestObjectState, IngestPayloadRepresentation,
+    IngestRepository, IngestRequest, IngestResult, IngestSource, IngestUploadId, ParsedDicomObject,
     ReceivedIngestObject, StorageAcceptanceDecision, StorageAcceptanceInput,
-    StorageAcceptancePolicy,
+    StorageAcceptancePolicy, StoredIngestObject,
 };
 
 /// Operational limits for ingest staging and backpressure.
@@ -555,6 +555,32 @@ impl InMemoryIngestService {
             transfer_syntax_uid,
         } = parsed;
 
+        if let Some(stored_object) = self
+            .lookup_stored_object(
+                identity.sop_instance_uid.as_deref(),
+                staged_body.content_length,
+                staged_body.sha256.as_str(),
+            )
+            .await
+        {
+            let checksum = checksum.or_else(|| stored_object.checksum());
+            let record = received_record_from_stored(
+                PreparedRecord {
+                    ingest_object_id,
+                    upload_id,
+                    checksum,
+                    identity,
+                    payload_representation,
+                    transfer_syntax_uid,
+                    source,
+                    outcome: IngestObjectOutcome::Stored,
+                },
+                stored_object,
+                IngestObjectState::PendingSync,
+            );
+            return Ok(PreparedIngestObject::Stored(record));
+        }
+
         let put_result = store_staged_body(
             self.object_store.as_ref(),
             ingest_object_id.clone(),
@@ -582,6 +608,48 @@ impl InMemoryIngestService {
         );
 
         Ok(PreparedIngestObject::Stored(record))
+    }
+
+    async fn lookup_stored_object(
+        &self,
+        sop_instance_uid: Option<&str>,
+        content_length: u64,
+        sha256: &str,
+    ) -> Option<StoredIngestObject> {
+        let sop_instance_uid = sop_instance_uid?;
+
+        let stored_object = match self
+            .repository
+            .find_stored_object_by_sop_instance_uid(sop_instance_uid)
+            .await
+        {
+            Ok(stored_object) => stored_object,
+            Err(error) => {
+                warn!(
+                    error = %error.message(),
+                    ingest.sop_instance_uid = sop_instance_uid,
+                    "failed to look up canonical ingest object; continuing with storage"
+                );
+                return None;
+            }
+        }?;
+
+        if stored_object.content_length != content_length {
+            return None;
+        }
+
+        let stored_checksum_algorithm = stored_object.checksum_algorithm.as_deref()?;
+        let stored_checksum_value = stored_object.checksum_value.as_deref()?;
+
+        if !stored_checksum_algorithm.eq_ignore_ascii_case(IngestChecksumAlgorithm::Sha256.as_str())
+        {
+            return None;
+        }
+        if !stored_checksum_value.eq_ignore_ascii_case(sha256) {
+            return None;
+        }
+
+        Some(stored_object)
     }
 
     async fn acquire_permit(&self) -> Option<OwnedSemaphorePermit> {
@@ -717,6 +785,28 @@ async fn store_staged_body(
             object_key,
             source,
         })
+}
+
+fn received_record_from_stored(
+    record: PreparedRecord,
+    stored_object: StoredIngestObject,
+    state: IngestObjectState,
+) -> ReceivedIngestObject {
+    ReceivedIngestObject {
+        ingest_object_id: record.ingest_object_id,
+        upload_id: record.upload_id,
+        object_key: stored_object.object_key,
+        content_length: stored_object.content_length,
+        etag: stored_object.etag,
+        checksum: record.checksum,
+        identity: record.identity,
+        payload_representation: record.payload_representation,
+        transfer_syntax_uid: record.transfer_syntax_uid,
+        source: record.source,
+        state,
+        outcome: record.outcome,
+        received_at: SystemTime::now(),
+    }
 }
 
 struct PreparedRecord {
@@ -969,12 +1059,25 @@ mod tests {
     #[derive(Default)]
     struct FakeRepository {
         records: Mutex<Vec<ReceivedIngestObject>>,
+        stored_objects: Mutex<HashMap<String, StoredIngestObject>>,
         calls: Mutex<usize>,
         failures: Mutex<VecDeque<IngestRepositoryError>>,
     }
 
     #[async_trait]
     impl IngestRepository for FakeRepository {
+        async fn find_stored_object_by_sop_instance_uid(
+            &self,
+            sop_instance_uid: &str,
+        ) -> Result<Option<StoredIngestObject>, IngestRepositoryError> {
+            Ok(self
+                .stored_objects
+                .lock()
+                .unwrap()
+                .get(sop_instance_uid)
+                .cloned())
+        }
+
         async fn record_received_objects(
             &self,
             records: &[ReceivedIngestObject],
@@ -1089,6 +1192,45 @@ mod tests {
         bytes
     }
 
+    fn explicit_vr_part10_file(identity: &IngestObjectIdentity) -> Vec<u8> {
+        let sop_class_uid = identity.sop_class_uid.as_deref().unwrap();
+        let sop_instance_uid = identity.sop_instance_uid.as_deref().unwrap();
+        let transfer_syntax_uid = "1.2.840.10008.1.2.1";
+
+        let mut file_meta_without_group_length = Vec::new();
+        push_ob(&mut file_meta_without_group_length, 0x0002, 0x0001, &[0, 1]);
+        push_ui(
+            &mut file_meta_without_group_length,
+            0x0002,
+            0x0002,
+            sop_class_uid,
+        );
+        push_ui(
+            &mut file_meta_without_group_length,
+            0x0002,
+            0x0003,
+            sop_instance_uid,
+        );
+        push_ui(
+            &mut file_meta_without_group_length,
+            0x0002,
+            0x0010,
+            transfer_syntax_uid,
+        );
+
+        let mut bytes = vec![0; 128];
+        bytes.extend_from_slice(b"DICM");
+        push_ul(
+            &mut bytes,
+            0x0002,
+            0x0000,
+            file_meta_without_group_length.len() as u32,
+        );
+        bytes.extend_from_slice(&file_meta_without_group_length);
+        bytes.extend_from_slice(&explicit_vr_dataset(identity));
+        bytes
+    }
+
     fn sha256_checksum(bytes: &[u8]) -> IngestChecksum {
         IngestChecksum::sha256(hex_lower(&Sha256::digest(bytes)))
     }
@@ -1114,6 +1256,26 @@ mod tests {
 
         bytes.extend_from_slice(&(value.len() as u16).to_le_bytes());
         bytes.extend_from_slice(&value);
+    }
+
+    fn push_ul(bytes: &mut Vec<u8>, group: u16, element: u16, value: u32) {
+        bytes.extend_from_slice(&group.to_le_bytes());
+        bytes.extend_from_slice(&element.to_le_bytes());
+        bytes.extend_from_slice(b"UL");
+        bytes.extend_from_slice(&4_u16.to_le_bytes());
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+
+    fn push_ob(bytes: &mut Vec<u8>, group: u16, element: u16, value: &[u8]) {
+        bytes.extend_from_slice(&group.to_le_bytes());
+        bytes.extend_from_slice(&element.to_le_bytes());
+        bytes.extend_from_slice(b"OB");
+        bytes.extend_from_slice(&0_u16.to_le_bytes());
+        bytes.extend_from_slice(&(value.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(value);
+        if value.len() % 2 == 1 {
+            bytes.push(0);
+        }
     }
 
     #[test]
@@ -1159,6 +1321,34 @@ mod tests {
         assert_eq!(object_store.puts.lock().unwrap().len(), 1);
         assert_eq!(*repository.calls.lock().unwrap(), 1);
         assert_eq!(repository.records.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn dicom_file_stream_storage_parses_after_staging_write() {
+        let upload_id = IngestUploadId::new();
+        let parsed_identity = identity();
+        let bytes = explicit_vr_part10_file(&parsed_identity);
+        let (service, object_store, _quarantine_object_store, _repository) = service_with_fakes();
+
+        let result = service
+            .ingest_upload_object(
+                IngestRequest::new(upload_id, bytes.clone())
+                    .with_payload_representation(IngestPayloadRepresentation::DicomFile),
+            )
+            .await
+            .expect("DICOM file storage should succeed");
+
+        assert_eq!(result.identity, parsed_identity);
+        assert_eq!(
+            result.payload_representation,
+            IngestPayloadRepresentation::DicomFile
+        );
+        assert_eq!(result.outcome, IngestObjectOutcome::Stored);
+        let object_key = result.object_key.expect("stored object key");
+        assert_eq!(
+            object_store.bodies.lock().unwrap().get(&object_key),
+            Some(&Bytes::from(bytes))
+        );
     }
 
     #[tokio::test]
@@ -1250,6 +1440,43 @@ mod tests {
 
         assert_eq!(result.outcome, IngestObjectOutcome::Stored);
         assert_eq!(result.state, IngestObjectState::PendingSync);
+    }
+
+    #[tokio::test]
+    async fn identical_duplicate_skips_object_store_write() {
+        let bytes = explicit_vr_dataset(&identity());
+        let checksum = sha256_checksum(&bytes);
+        let (service, object_store, _quarantine_object_store, repository) = service_with_fakes();
+        let existing_key = ObjectKey::new("instances/existing.dcm").unwrap();
+        repository.stored_objects.lock().unwrap().insert(
+            identity().sop_instance_uid.clone().unwrap(),
+            StoredIngestObject {
+                object_key: existing_key.clone(),
+                content_length: bytes.len() as u64,
+                etag: Some("test-etag".to_string()),
+                checksum_algorithm: Some(checksum.algorithm.as_str().to_string()),
+                checksum_value: Some(checksum.value.clone()),
+            },
+        );
+
+        let result = service
+            .ingest_upload_object(
+                IngestRequest::new(IngestUploadId::new(), bytes)
+                    .with_payload_representation(IngestPayloadRepresentation::DicomDataSet)
+                    .with_transfer_syntax_uid("1.2.840.10008.1.2.1")
+                    .with_checksum(checksum),
+            )
+            .await
+            .expect("identical duplicate should store");
+
+        assert_eq!(object_store.puts.lock().unwrap().len(), 0);
+        assert_eq!(result.object_key, Some(existing_key.clone()));
+        assert_eq!(*repository.calls.lock().unwrap(), 1);
+        assert_eq!(repository.records.lock().unwrap().len(), 1);
+        assert_eq!(
+            repository.records.lock().unwrap()[0].object_key,
+            existing_key
+        );
     }
 
     #[tokio::test]

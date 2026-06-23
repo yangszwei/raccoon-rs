@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 
-use crate::{IngestRepositoryError, ReceivedIngestObject};
+use crate::{IngestRepositoryError, ReceivedIngestObject, StoredIngestObject};
 
 /// Write-side repository contract for persisted ingest metadata.
 ///
@@ -10,6 +10,12 @@ use crate::{IngestRepositoryError, ReceivedIngestObject};
 /// from normal sync.
 #[async_trait]
 pub trait IngestRepository: Send + Sync {
+    /// Looks up the canonical stored object for a SOP Instance UID.
+    async fn find_stored_object_by_sop_instance_uid(
+        &self,
+        sop_instance_uid: &str,
+    ) -> Result<Option<StoredIngestObject>, IngestRepositoryError>;
+
     /// Records received objects in one repository operation.
     async fn record_received_objects(
         &self,

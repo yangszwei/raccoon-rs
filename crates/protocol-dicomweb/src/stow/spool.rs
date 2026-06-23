@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+#[cfg(test)]
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use futures_util::StreamExt;
@@ -8,6 +9,7 @@ use tokio_util::io::ReaderStream;
 
 use crate::DicomWebError;
 
+#[cfg(test)]
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug)]
@@ -46,7 +48,7 @@ pub(crate) async fn spool_field(
 ) -> Result<SpoolFile, DicomWebError> {
     let path = std::env::temp_dir().join(format!(
         "raccoon-dicomweb-stow-{}-{part_index}",
-        TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+        uuid::Uuid::new_v4()
     ));
     spool_field_at_path(field, path, max_size_bytes).await
 }
