@@ -8,6 +8,7 @@ use async_trait::async_trait;
 use futures_util::StreamExt;
 use opentelemetry::global;
 use opentelemetry::propagation::{Extractor, Injector};
+use opentelemetry::trace::TraceContextExt;
 use raccoon_contract_object_store::{ObjectKey, ObjectStoreError};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::{Mutex, mpsc};
@@ -454,62 +455,65 @@ impl IngestTransportGrpcService {
 impl IngestTransportService for IngestTransportGrpcService {
     type StreamIngestStream = ReceiverStream<Result<proto::IngestTransportResponse, Status>>;
 
-    #[instrument(
-        skip(self, request),
-        fields(
-            rpc.system.name = RPC_SYSTEM_NAME,
-            rpc.method = METHOD_STREAM_INGEST,
-            rpc.response.status_code = tracing::field::Empty,
-            error.type = tracing::field::Empty,
-        )
-    )]
     async fn stream_ingest(
         &self,
         request: Request<tonic::Streaming<proto::IngestTransportRequest>>,
     ) -> Result<Response<Self::StreamIngestStream>, Status> {
-        set_current_span_parent(request.metadata());
-        let request_stream = request.into_inner();
-        let (response_tx, response_rx) = mpsc::channel(8);
-        let service = self.service.clone();
-        let max_body_chunk_bytes = self.max_body_chunk_bytes;
-        let span = Span::current();
-        let response_tx_for_errors = response_tx.clone();
-        let started_at = Instant::now();
-
-        tokio::spawn(
-            async move {
-                let result =
-                    process_stream(service, request_stream, response_tx, max_body_chunk_bytes)
-                        .await;
-
-                if let Err(status) = &result {
-                    Span::current().record(
-                        "rpc.response.status_code",
-                        tracing::field::display(status.code()),
-                    );
-                } else {
-                    record_ok();
-                }
-                let status_code = result
-                    .as_ref()
-                    .map(|_| tonic::Code::Ok)
-                    .unwrap_or_else(|status| status.code());
-                tracing::info!(
-                    rpc.system.name = RPC_SYSTEM_NAME,
-                    rpc.method = METHOD_STREAM_INGEST,
-                    rpc.response.status_code = ?status_code,
-                    service.duration_ms = elapsed_ms(started_at),
-                    "Ingest gRPC stream completed"
-                );
-
-                if let Err(status) = result {
-                    let _ = response_tx_for_errors.send(Err(status)).await;
-                }
-            }
-            .instrument(span),
+        let rpc_span = tracing::info_span!(
+            METHOD_STREAM_INGEST,
+            rpc.system.name = RPC_SYSTEM_NAME,
+            rpc.method = METHOD_STREAM_INGEST,
+            rpc.response.status_code = tracing::field::Empty,
+            error.type = tracing::field::Empty,
         );
+        set_span_parent_from_metadata(&rpc_span, request.metadata());
 
-        Ok(Response::new(ReceiverStream::new(response_rx)))
+        async move {
+            let request_stream = request.into_inner();
+            let (response_tx, response_rx) = mpsc::channel(8);
+            let service = self.service.clone();
+            let max_body_chunk_bytes = self.max_body_chunk_bytes;
+            let span = Span::current();
+            let response_tx_for_errors = response_tx.clone();
+            let started_at = Instant::now();
+
+            tokio::spawn(
+                async move {
+                    let result =
+                        process_stream(service, request_stream, response_tx, max_body_chunk_bytes)
+                            .await;
+
+                    if let Err(status) = &result {
+                        Span::current().record(
+                            "rpc.response.status_code",
+                            tracing::field::display(status.code()),
+                        );
+                    } else {
+                        record_ok();
+                    }
+                    let status_code = result
+                        .as_ref()
+                        .map(|_| tonic::Code::Ok)
+                        .unwrap_or_else(|status| status.code());
+                    tracing::info!(
+                        rpc.system.name = RPC_SYSTEM_NAME,
+                        rpc.method = METHOD_STREAM_INGEST,
+                        rpc.response.status_code = ?status_code,
+                        service.duration_ms = elapsed_ms(started_at),
+                        "Ingest gRPC stream completed"
+                    );
+
+                    if let Err(status) = result {
+                        let _ = response_tx_for_errors.send(Err(status)).await;
+                    }
+                }
+                .instrument(span),
+            );
+
+            Ok(Response::new(ReceiverStream::new(response_rx)))
+        }
+        .instrument(rpc_span)
+        .await
     }
 }
 
@@ -756,12 +760,14 @@ fn record_ok() {
     Span::current().record("rpc.response.status_code", 0i64);
 }
 
-fn set_current_span_parent(metadata: &MetadataMap) {
-    let parent_context = global::get_text_map_propagator(|propagator| {
+fn set_span_parent_from_metadata(span: &Span, metadata: &MetadataMap) {
+    let parent_cx = global::get_text_map_propagator(|propagator| {
         let extractor = MetadataExtractor(metadata);
         propagator.extract(&extractor)
     });
-    let _ = Span::current().set_parent(parent_context);
+    if parent_cx.has_active_span() {
+        let _ = span.set_parent(parent_cx);
+    }
 }
 
 struct MetadataExtractor<'a>(&'a MetadataMap);
@@ -1439,13 +1445,27 @@ mod tests {
 
     use async_trait::async_trait;
     use futures_util::StreamExt;
+    use opentelemetry::propagation::{Extractor, Injector};
     use raccoon_contract_object_store::{
         ByteStream, Bytes, Object, ObjectKey, ObjectMetadata, ObjectStore, ObjectStoreError,
         PutResult,
     };
+    use tonic::metadata::MetadataMap;
 
     use super::*;
     use crate::{IngestRepository, IngestRepositoryError};
+
+    #[test]
+    fn metadata_carrier_injects_and_extracts_trace_context() {
+        const TRACEPARENT: &str = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+
+        let mut metadata = MetadataMap::new();
+        MetadataInjector(&mut metadata).set("traceparent", TRACEPARENT.to_string());
+        let extractor = MetadataExtractor(&metadata);
+
+        assert_eq!(extractor.get("traceparent"), Some(TRACEPARENT));
+        assert!(extractor.keys().contains(&"traceparent"));
+    }
 
     #[derive(Default)]
     struct FakeObjectStore {

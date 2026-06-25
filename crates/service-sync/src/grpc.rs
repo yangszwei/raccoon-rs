@@ -356,6 +356,9 @@ impl Injector for MetadataInjector<'_> {
 mod tests {
     use std::sync::Mutex;
 
+    use opentelemetry::propagation::{Extractor, Injector};
+    use tonic::metadata::MetadataMap;
+
     use super::*;
 
     struct FakeSyncService {
@@ -380,6 +383,18 @@ mod tests {
         ) -> Result<(), SyncError> {
             Ok(())
         }
+    }
+
+    #[test]
+    fn metadata_carrier_injects_and_extracts_trace_context() {
+        const TRACEPARENT: &str = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+
+        let mut metadata = MetadataMap::new();
+        MetadataInjector(&mut metadata).set("traceparent", TRACEPARENT.to_string());
+        let extractor = MetadataExtractor(&metadata);
+
+        assert_eq!(extractor.get("traceparent"), Some(TRACEPARENT));
+        assert!(extractor.keys().contains(&"traceparent"));
     }
 
     #[test]

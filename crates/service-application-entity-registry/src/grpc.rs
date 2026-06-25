@@ -10,7 +10,7 @@ use tokio::sync::Mutex;
 use tonic::codegen::{Body, Bytes, StdError};
 use tonic::metadata::{AsciiMetadataKey, KeyRef, MetadataMap, MetadataValue};
 use tonic::{Request, Response, Status};
-use tracing::{Span, instrument};
+use tracing::{Instrument, Span, instrument};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use crate::{
@@ -365,134 +365,146 @@ impl<R> ApplicationEntityRegistryService for ApplicationEntityRegistryGrpcServic
 where
     R: ApplicationEntityRegistry + Send + Sync + 'static,
 {
-    #[instrument(
-        skip(self, request),
-        fields(
-            rpc.system.name = RPC_SYSTEM_NAME,
-            rpc.method = METHOD_LIST_LOCALS,
-            rpc.response.status_code = tracing::field::Empty,
-            error.type = tracing::field::Empty,
-        )
-    )]
     async fn list_local_application_entities(
         &self,
         request: Request<proto::ListLocalApplicationEntitiesRequest>,
     ) -> Result<Response<proto::ListLocalApplicationEntitiesResponse>, Status> {
-        set_current_span_parent(request.metadata());
-        let registry = self.registry.lock().await;
-        let result = registry.list_locals().await;
-
-        match result {
-            Ok(application_entities) => {
-                record_ok();
-                Ok(Response::new(proto::ListLocalApplicationEntitiesResponse {
-                    application_entities: application_entities
-                        .into_iter()
-                        .map(Into::into)
-                        .collect(),
-                }))
-            }
-            Err(error) => Err(record_error(status_from_registry_error(error))),
-        }
-    }
-
-    #[instrument(
-        skip(self, request),
-        fields(
+        let rpc_span = tracing::info_span!(
+            METHOD_LIST_LOCALS,
             rpc.system.name = RPC_SYSTEM_NAME,
-            rpc.method = METHOD_LIST_PEERS,
+            rpc.method = METHOD_LIST_LOCALS,
             rpc.response.status_code = tracing::field::Empty,
             error.type = tracing::field::Empty,
-        )
-    )]
+        );
+        set_span_parent_from_metadata(&rpc_span, request.metadata());
+
+        async move {
+            let registry = self.registry.lock().await;
+            let result = registry.list_locals().await;
+
+            match result {
+                Ok(application_entities) => {
+                    record_ok();
+                    Ok(Response::new(proto::ListLocalApplicationEntitiesResponse {
+                        application_entities: application_entities
+                            .into_iter()
+                            .map(Into::into)
+                            .collect(),
+                    }))
+                }
+                Err(error) => Err(record_error(status_from_registry_error(error))),
+            }
+        }
+        .instrument(rpc_span)
+        .await
+    }
+
     async fn list_peer_application_entities(
         &self,
         request: Request<proto::ListPeerApplicationEntitiesRequest>,
     ) -> Result<Response<proto::ListPeerApplicationEntitiesResponse>, Status> {
-        set_current_span_parent(request.metadata());
-        let registry = self.registry.lock().await;
-        let result = registry.list_peers().await;
+        let rpc_span = tracing::info_span!(
+            METHOD_LIST_PEERS,
+            rpc.system.name = RPC_SYSTEM_NAME,
+            rpc.method = METHOD_LIST_PEERS,
+            rpc.response.status_code = tracing::field::Empty,
+            error.type = tracing::field::Empty,
+        );
+        set_span_parent_from_metadata(&rpc_span, request.metadata());
 
-        match result {
-            Ok(application_entities) => {
-                record_ok();
-                Ok(Response::new(proto::ListPeerApplicationEntitiesResponse {
-                    application_entities: application_entities
-                        .into_iter()
-                        .map(Into::into)
-                        .collect(),
-                }))
+        async move {
+            let registry = self.registry.lock().await;
+            let result = registry.list_peers().await;
+
+            match result {
+                Ok(application_entities) => {
+                    record_ok();
+                    Ok(Response::new(proto::ListPeerApplicationEntitiesResponse {
+                        application_entities: application_entities
+                            .into_iter()
+                            .map(Into::into)
+                            .collect(),
+                    }))
+                }
+                Err(error) => Err(record_error(status_from_registry_error(error))),
             }
-            Err(error) => Err(record_error(status_from_registry_error(error))),
         }
+        .instrument(rpc_span)
+        .await
     }
 
-    #[instrument(
-        skip(self, request),
-        fields(
+    async fn get_local_application_entity(
+        &self,
+        request: Request<proto::GetLocalApplicationEntityRequest>,
+    ) -> Result<Response<proto::GetLocalApplicationEntityResponse>, Status> {
+        let rpc_span = tracing::info_span!(
+            METHOD_GET_LOCAL,
             ae.title = tracing::field::Empty,
             rpc.system.name = RPC_SYSTEM_NAME,
             rpc.method = METHOD_GET_LOCAL,
             rpc.response.status_code = tracing::field::Empty,
             error.type = tracing::field::Empty,
-        )
-    )]
-    async fn get_local_application_entity(
-        &self,
-        request: Request<proto::GetLocalApplicationEntityRequest>,
-    ) -> Result<Response<proto::GetLocalApplicationEntityResponse>, Status> {
-        set_current_span_parent(request.metadata());
-        let title = request.into_inner().title;
-        Span::current().record("ae.title", title.as_str());
-        let ae_title = AeTitle::from_str(title.as_str())
-            .map_err(|error| record_error(Status::invalid_argument(error.to_string())))?;
+        );
+        set_span_parent_from_metadata(&rpc_span, request.metadata());
 
-        let registry = self.registry.lock().await;
-        let result = registry.get_local(&ae_title).await;
+        async move {
+            let title = request.into_inner().title;
+            Span::current().record("ae.title", title.as_str());
+            let ae_title = AeTitle::from_str(title.as_str())
+                .map_err(|error| record_error(Status::invalid_argument(error.to_string())))?;
 
-        match result {
-            Ok(application_entity) => {
-                record_ok();
-                Ok(Response::new(proto::GetLocalApplicationEntityResponse {
-                    application_entity: application_entity.map(Into::into),
-                }))
+            let registry = self.registry.lock().await;
+            let result = registry.get_local(&ae_title).await;
+
+            match result {
+                Ok(application_entity) => {
+                    record_ok();
+                    Ok(Response::new(proto::GetLocalApplicationEntityResponse {
+                        application_entity: application_entity.map(Into::into),
+                    }))
+                }
+                Err(error) => Err(record_error(status_from_registry_error(error))),
             }
-            Err(error) => Err(record_error(status_from_registry_error(error))),
         }
+        .instrument(rpc_span)
+        .await
     }
 
-    #[instrument(
-        skip(self, request),
-        fields(
+    async fn get_peer_application_entity(
+        &self,
+        request: Request<proto::GetPeerApplicationEntityRequest>,
+    ) -> Result<Response<proto::GetPeerApplicationEntityResponse>, Status> {
+        let rpc_span = tracing::info_span!(
+            METHOD_GET_PEER,
             ae.title = tracing::field::Empty,
             rpc.system.name = RPC_SYSTEM_NAME,
             rpc.method = METHOD_GET_PEER,
             rpc.response.status_code = tracing::field::Empty,
             error.type = tracing::field::Empty,
-        )
-    )]
-    async fn get_peer_application_entity(
-        &self,
-        request: Request<proto::GetPeerApplicationEntityRequest>,
-    ) -> Result<Response<proto::GetPeerApplicationEntityResponse>, Status> {
-        set_current_span_parent(request.metadata());
-        let title = request.into_inner().title;
-        Span::current().record("ae.title", title.as_str());
-        let ae_title = AeTitle::from_str(title.as_str())
-            .map_err(|error| record_error(Status::invalid_argument(error.to_string())))?;
+        );
+        set_span_parent_from_metadata(&rpc_span, request.metadata());
 
-        let registry = self.registry.lock().await;
-        let result = registry.get_peer(&ae_title).await;
+        async move {
+            let title = request.into_inner().title;
+            Span::current().record("ae.title", title.as_str());
+            let ae_title = AeTitle::from_str(title.as_str())
+                .map_err(|error| record_error(Status::invalid_argument(error.to_string())))?;
 
-        match result {
-            Ok(application_entity) => {
-                record_ok();
-                Ok(Response::new(proto::GetPeerApplicationEntityResponse {
-                    application_entity: application_entity.map(Into::into),
-                }))
+            let registry = self.registry.lock().await;
+            let result = registry.get_peer(&ae_title).await;
+
+            match result {
+                Ok(application_entity) => {
+                    record_ok();
+                    Ok(Response::new(proto::GetPeerApplicationEntityResponse {
+                        application_entity: application_entity.map(Into::into),
+                    }))
+                }
+                Err(error) => Err(record_error(status_from_registry_error(error))),
             }
-            Err(error) => Err(record_error(status_from_registry_error(error))),
         }
+        .instrument(rpc_span)
+        .await
     }
 }
 
@@ -501,76 +513,80 @@ impl<R> ApplicationEntityRegistryWriterService for ApplicationEntityRegistryWrit
 where
     R: ApplicationEntityRegistryWriter + Send + Sync + 'static,
 {
-    #[instrument(
-        skip(self, request),
-        fields(
+    async fn insert_local_application_entity(
+        &self,
+        request: Request<proto::InsertLocalApplicationEntityRequest>,
+    ) -> Result<Response<proto::InsertLocalApplicationEntityResponse>, Status> {
+        let rpc_span = tracing::info_span!(
+            METHOD_INSERT_LOCAL,
             ae.title = tracing::field::Empty,
             rpc.system.name = RPC_SYSTEM_NAME,
             rpc.method = METHOD_INSERT_LOCAL,
             rpc.response.status_code = tracing::field::Empty,
             error.type = tracing::field::Empty,
-        )
-    )]
-    async fn insert_local_application_entity(
-        &self,
-        request: Request<proto::InsertLocalApplicationEntityRequest>,
-    ) -> Result<Response<proto::InsertLocalApplicationEntityResponse>, Status> {
-        set_current_span_parent(request.metadata());
-        let application_entity = request
-            .into_inner()
-            .application_entity
-            .ok_or_else(|| record_error(Status::invalid_argument("missing application entity")))?;
-        Span::current().record("ae.title", application_entity.title.as_str());
-        let application_entity = DomainLocalApplicationEntity::try_from(application_entity)
-            .map_err(|error| record_error(status_from_registry_error(error)))?;
+        );
+        set_span_parent_from_metadata(&rpc_span, request.metadata());
 
-        let mut registry = self.registry.lock().await;
-        let result = registry.insert_local(application_entity).await;
+        async move {
+            let application_entity = request.into_inner().application_entity.ok_or_else(|| {
+                record_error(Status::invalid_argument("missing application entity"))
+            })?;
+            Span::current().record("ae.title", application_entity.title.as_str());
+            let application_entity = DomainLocalApplicationEntity::try_from(application_entity)
+                .map_err(|error| record_error(status_from_registry_error(error)))?;
 
-        match result {
-            Ok(()) => {
-                record_ok();
-                Ok(Response::new(
-                    proto::InsertLocalApplicationEntityResponse {},
-                ))
+            let mut registry = self.registry.lock().await;
+            let result = registry.insert_local(application_entity).await;
+
+            match result {
+                Ok(()) => {
+                    record_ok();
+                    Ok(Response::new(
+                        proto::InsertLocalApplicationEntityResponse {},
+                    ))
+                }
+                Err(error) => Err(record_error(status_from_registry_error(error))),
             }
-            Err(error) => Err(record_error(status_from_registry_error(error))),
         }
+        .instrument(rpc_span)
+        .await
     }
 
-    #[instrument(
-        skip(self, request),
-        fields(
+    async fn insert_peer_application_entity(
+        &self,
+        request: Request<proto::InsertPeerApplicationEntityRequest>,
+    ) -> Result<Response<proto::InsertPeerApplicationEntityResponse>, Status> {
+        let rpc_span = tracing::info_span!(
+            METHOD_INSERT_PEER,
             ae.title = tracing::field::Empty,
             rpc.system.name = RPC_SYSTEM_NAME,
             rpc.method = METHOD_INSERT_PEER,
             rpc.response.status_code = tracing::field::Empty,
             error.type = tracing::field::Empty,
-        )
-    )]
-    async fn insert_peer_application_entity(
-        &self,
-        request: Request<proto::InsertPeerApplicationEntityRequest>,
-    ) -> Result<Response<proto::InsertPeerApplicationEntityResponse>, Status> {
-        set_current_span_parent(request.metadata());
-        let application_entity = request
-            .into_inner()
-            .application_entity
-            .ok_or_else(|| record_error(Status::invalid_argument("missing application entity")))?;
-        Span::current().record("ae.title", application_entity.title.as_str());
-        let application_entity = DomainPeerApplicationEntity::try_from(application_entity)
-            .map_err(|error| record_error(status_from_registry_error(error)))?;
+        );
+        set_span_parent_from_metadata(&rpc_span, request.metadata());
 
-        let mut registry = self.registry.lock().await;
-        let result = registry.insert_peer(application_entity).await;
+        async move {
+            let application_entity = request.into_inner().application_entity.ok_or_else(|| {
+                record_error(Status::invalid_argument("missing application entity"))
+            })?;
+            Span::current().record("ae.title", application_entity.title.as_str());
+            let application_entity = DomainPeerApplicationEntity::try_from(application_entity)
+                .map_err(|error| record_error(status_from_registry_error(error)))?;
 
-        match result {
-            Ok(()) => {
-                record_ok();
-                Ok(Response::new(proto::InsertPeerApplicationEntityResponse {}))
+            let mut registry = self.registry.lock().await;
+            let result = registry.insert_peer(application_entity).await;
+
+            match result {
+                Ok(()) => {
+                    record_ok();
+                    Ok(Response::new(proto::InsertPeerApplicationEntityResponse {}))
+                }
+                Err(error) => Err(record_error(status_from_registry_error(error))),
             }
-            Err(error) => Err(record_error(status_from_registry_error(error))),
         }
+        .instrument(rpc_span)
+        .await
     }
 }
 
@@ -652,12 +668,12 @@ fn inject_current_trace_context(metadata: &mut MetadataMap) {
     });
 }
 
-fn set_current_span_parent(metadata: &MetadataMap) {
+fn set_span_parent_from_metadata(span: &Span, metadata: &MetadataMap) {
     let parent_context = global::get_text_map_propagator(|propagator| {
         propagator.extract(&MetadataExtractor(metadata))
     });
     if parent_context.has_active_span() {
-        let _ = Span::current().set_parent(parent_context);
+        let _ = span.set_parent(parent_context);
     }
 }
 
