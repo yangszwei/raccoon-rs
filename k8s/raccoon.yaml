@@ -1,0 +1,1015 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: raccoon
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: raccoon-common-env
+  namespace: raccoon
+data:
+  RACCOON__GRPC__BIND_ADDRESS: 0.0.0.0:50051
+  RACCOON__FILESYSTEM__ROOT: /data
+  RACCOON__APPLICATION_ENTITY_REGISTRY__ENDPOINT: http://application-entity-registry:50051
+  RACCOON__INGEST__ENDPOINT: http://ingest:50051
+  RACCOON__QUERY__ENDPOINT: http://query:50051
+  RACCOON__RETRIEVE__ENDPOINT: http://retrieve:50051
+  RACCOON__TELEMETRY__TRACING__ENABLED: "true"
+  RACCOON__TELEMETRY__TRACING__EXPORTER__ENDPOINT: http://otel-collector:4317
+  RACCOON__TELEMETRY__TRACING__EXPORTER__PROTOCOL: grpc
+  RACCOON__TELEMETRY__TRACING__EXPORTER__TIMEOUT_SECONDS: "10"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: otel-collector-config
+  namespace: raccoon
+data:
+  otel-collector-config.yaml: |
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:4317
+          http:
+            endpoint: 0.0.0.0:4318
+
+    processors:
+      batch: {}
+
+    exporters:
+      otlp/jaeger:
+        endpoint: jaeger:4317
+        tls:
+          insecure: true
+
+    service:
+      pipelines:
+        traces:
+          receivers: [otlp]
+          processors: [batch]
+          exporters: [otlp/jaeger]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: otel-collector
+  namespace: raccoon
+spec:
+  selector:
+    app.kubernetes.io/name: otel-collector
+  ports:
+    - name: otlp-grpc
+      port: 4317
+      targetPort: 4317
+    - name: otlp-http
+      port: 4318
+      targetPort: 4318
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: otel-collector
+  namespace: raccoon
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: otel-collector
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: otel-collector
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: worker
+      containers:
+        - name: otel-collector
+          image: otel/opentelemetry-collector-contrib:0.104.0
+          imagePullPolicy: IfNotPresent
+          args:
+            - --config=/etc/otel-collector-config.yaml
+          ports:
+            - containerPort: 4317
+              name: otlp-grpc
+            - containerPort: 4318
+              name: otlp-http
+          readinessProbe:
+            tcpSocket:
+              port: 4317
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 20
+          livenessProbe:
+            tcpSocket:
+              port: 4317
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+          volumeMounts:
+            - name: config
+              mountPath: /etc/otel-collector-config.yaml
+              subPath: otel-collector-config.yaml
+      volumes:
+        - name: config
+          configMap:
+            name: otel-collector-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: jaeger
+  namespace: raccoon
+spec:
+  selector:
+    app.kubernetes.io/name: jaeger
+  ports:
+    - name: otlp-grpc
+      port: 4317
+      targetPort: 4317
+    - name: query
+      port: 16686
+      targetPort: 16686
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: jaeger-query
+  namespace: raccoon
+spec:
+  type: NodePort
+  selector:
+    app.kubernetes.io/name: jaeger
+  ports:
+    - name: query
+      port: 16686
+      targetPort: 16686
+      nodePort: 31686
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jaeger
+  namespace: raccoon
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: jaeger
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: jaeger
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: worker
+      initContainers:
+        - name: prepare-badger
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - mkdir -p /badger/data /badger/key && chown -R 10001:10001 /badger
+          volumeMounts:
+            - name: badger
+              mountPath: /badger
+      containers:
+        - name: jaeger
+          image: jaegertracing/all-in-one:1.57
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 4317
+              name: otlp-grpc
+            - containerPort: 16686
+              name: query
+          env:
+            - name: COLLECTOR_OTLP_ENABLED
+              value: "true"
+            - name: SPAN_STORAGE_TYPE
+              value: badger
+            - name: BADGER_EPHEMERAL
+              value: "false"
+            - name: BADGER_DIRECTORY_VALUE
+              value: /badger/data
+            - name: BADGER_DIRECTORY_KEY
+              value: /badger/key
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 16686
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 20
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 16686
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+          volumeMounts:
+            - name: badger
+              mountPath: /badger
+      volumes:
+        - name: badger
+          hostPath:
+            path: /var/lib/raccoon/jaeger-badger
+            type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: write-postgres
+  namespace: raccoon
+spec:
+  selector:
+    app.kubernetes.io/name: write-postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: write-postgres
+  namespace: raccoon
+spec:
+  serviceName: write-postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: write-postgres
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: write-postgres
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: worker
+      containers:
+        - name: postgres
+          image: postgres:17-alpine
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 5432
+              name: postgres
+          env:
+            - name: POSTGRES_DB
+              value: raccoon
+            - name: POSTGRES_USER
+              value: raccoon
+            - name: POSTGRES_PASSWORD
+              value: raccoon
+          readinessProbe:
+            exec:
+              command:
+                - pg_isready
+                - -U
+                - raccoon
+                - -d
+                - raccoon
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 20
+          livenessProbe:
+            exec:
+              command:
+                - pg_isready
+                - -U
+                - raccoon
+                - -d
+                - raccoon
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+      volumes:
+        - name: data
+          hostPath:
+            path: /var/lib/raccoon/write-postgres
+            type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: read-postgres
+  namespace: raccoon
+spec:
+  selector:
+    app.kubernetes.io/name: read-postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: read-postgres
+  namespace: raccoon
+spec:
+  serviceName: read-postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: read-postgres
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: read-postgres
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: worker
+      containers:
+        - name: postgres
+          image: postgres:17-alpine
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 5432
+              name: postgres
+          env:
+            - name: POSTGRES_DB
+              value: raccoon
+            - name: POSTGRES_USER
+              value: raccoon
+            - name: POSTGRES_PASSWORD
+              value: raccoon
+          readinessProbe:
+            exec:
+              command:
+                - pg_isready
+                - -U
+                - raccoon
+                - -d
+                - raccoon
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 20
+          livenessProbe:
+            exec:
+              command:
+                - pg_isready
+                - -U
+                - raccoon
+                - -d
+                - raccoon
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+      volumes:
+        - name: data
+          hostPath:
+            path: /var/lib/raccoon/read-postgres
+            type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: application-entity-registry
+  namespace: raccoon
+spec:
+  selector:
+    app.kubernetes.io/name: application-entity-registry
+  ports:
+    - name: grpc
+      port: 50051
+      targetPort: 50051
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: application-entity-registry
+  namespace: raccoon
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: application-entity-registry
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: application-entity-registry
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: worker
+      containers:
+        - name: application-entity-registry
+          image: siweiyang/raccoon:application-entity-registry
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 50051
+              name: grpc
+          envFrom:
+            - configMapRef:
+                name: raccoon-common-env
+          env:
+            - name: RACCOON_AE_REGISTRY__APPLICATION_ENTITIES__LOCAL__0__TITLE
+              value: RACCOON
+            - name: RACCOON_AE_REGISTRY__APPLICATION_ENTITIES__LOCAL__0__BIND_ADDRESS
+              value: 0.0.0.0:11112
+            - name: RACCOON_AE_REGISTRY__APPLICATION_ENTITIES__LOCAL__0__MAX_CONCURRENT_ASSOCIATIONS
+              value: "64"
+            - name: RACCOON_AE_REGISTRY__APPLICATION_ENTITIES__LOCAL__0__MAX_PDU_LENGTH
+              value: "65536"
+            - name: RACCOON_AE_REGISTRY__APPLICATION_ENTITIES__PEER__0__TITLE
+              value: RACCOON-MOVE
+            - name: RACCOON_AE_REGISTRY__APPLICATION_ENTITIES__PEER__0__ADDRESS
+              value: c-move-destination:11113
+            - name: RACCOON_AE_REGISTRY__APPLICATION_ENTITIES__PEER__0__CONNECT_TIMEOUT_SECONDS
+              value: "5"
+            - name: RACCOON_AE_REGISTRY__APPLICATION_ENTITIES__PEER__0__READ_TIMEOUT_SECONDS
+              value: "30"
+            - name: RACCOON_AE_REGISTRY__APPLICATION_ENTITIES__PEER__0__WRITE_TIMEOUT_SECONDS
+              value: "30"
+            - name: RACCOON_AE_REGISTRY__APPLICATION_ENTITIES__PEER__0__MAX_PDU_LENGTH
+              value: "65536"
+          readinessProbe:
+            exec:
+              command:
+                - grpc-healthcheck
+                - http://127.0.0.1:50051
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 20
+          livenessProbe:
+            exec:
+              command:
+                - grpc-healthcheck
+                - http://127.0.0.1:50051
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ingest
+  namespace: raccoon
+spec:
+  selector:
+    app.kubernetes.io/name: ingest
+  ports:
+    - name: grpc
+      port: 50051
+      targetPort: 50051
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ingest
+  namespace: raccoon
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ingest
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ingest
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: worker
+      initContainers:
+        - name: wait-for-write-postgres
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - until nc -z write-postgres 5432; do sleep 2; done
+      containers:
+        - name: ingest
+          image: siweiyang/raccoon:ingest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 50051
+              name: grpc
+          envFrom:
+            - configMapRef:
+                name: raccoon-common-env
+          env:
+            - name: RACCOON__DATABASE__TYPE
+              value: postgresql
+            - name: RACCOON__DATABASE__URL
+              value: postgres://raccoon:raccoon@write-postgres:5432/raccoon
+          readinessProbe:
+            exec:
+              command:
+                - grpc-healthcheck
+                - http://127.0.0.1:50051
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 20
+          livenessProbe:
+            exec:
+              command:
+                - grpc-healthcheck
+                - http://127.0.0.1:50051
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+          volumeMounts:
+            - name: objects
+              mountPath: /data/objects
+      volumes:
+        - name: objects
+          hostPath:
+            path: /var/lib/raccoon/objects
+            type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: query
+  namespace: raccoon
+spec:
+  selector:
+    app.kubernetes.io/name: query
+  ports:
+    - name: grpc
+      port: 50051
+      targetPort: 50051
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: query
+  namespace: raccoon
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: query
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: query
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: worker
+      initContainers:
+        - name: wait-for-read-postgres
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - until nc -z read-postgres 5432; do sleep 2; done
+      containers:
+        - name: query
+          image: siweiyang/raccoon:query
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 50051
+              name: grpc
+          envFrom:
+            - configMapRef:
+                name: raccoon-common-env
+          env:
+            - name: RACCOON__DATABASE__TYPE
+              value: postgresql
+            - name: RACCOON__DATABASE__URL
+              value: postgres://raccoon:raccoon@read-postgres:5432/raccoon
+          readinessProbe:
+            exec:
+              command:
+                - grpc-healthcheck
+                - http://127.0.0.1:50051
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 20
+          livenessProbe:
+            exec:
+              command:
+                - grpc-healthcheck
+                - http://127.0.0.1:50051
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: retrieve
+  namespace: raccoon
+spec:
+  selector:
+    app.kubernetes.io/name: retrieve
+  ports:
+    - name: grpc
+      port: 50051
+      targetPort: 50051
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: retrieve
+  namespace: raccoon
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: retrieve
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: retrieve
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: worker
+      initContainers:
+        - name: wait-for-read-postgres
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - until nc -z read-postgres 5432; do sleep 2; done
+      containers:
+        - name: retrieve
+          image: siweiyang/raccoon:retrieve
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 50051
+              name: grpc
+          envFrom:
+            - configMapRef:
+                name: raccoon-common-env
+          env:
+            - name: RACCOON__DATABASE__TYPE
+              value: postgresql
+            - name: RACCOON__DATABASE__URL
+              value: postgres://raccoon:raccoon@read-postgres:5432/raccoon
+          readinessProbe:
+            exec:
+              command:
+                - grpc-healthcheck
+                - http://127.0.0.1:50051
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 20
+          livenessProbe:
+            exec:
+              command:
+                - grpc-healthcheck
+                - http://127.0.0.1:50051
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+          volumeMounts:
+            - name: objects
+              mountPath: /data/objects
+      volumes:
+        - name: objects
+          hostPath:
+            path: /var/lib/raccoon/objects
+            type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sync
+  namespace: raccoon
+spec:
+  selector:
+    app.kubernetes.io/name: sync
+  ports:
+    - name: grpc
+      port: 50051
+      targetPort: 50051
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sync
+  namespace: raccoon
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: sync
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: sync
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: worker
+      initContainers:
+        - name: wait-for-write-postgres
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - until nc -z write-postgres 5432; do sleep 2; done
+        - name: wait-for-read-postgres
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - until nc -z read-postgres 5432; do sleep 2; done
+      containers:
+        - name: sync
+          image: siweiyang/raccoon:sync
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 50051
+              name: grpc
+          envFrom:
+            - configMapRef:
+                name: raccoon-common-env
+          env:
+            - name: RACCOON_SYNC__DATABASE__WRITE__TYPE
+              value: postgresql
+            - name: RACCOON_SYNC__DATABASE__WRITE__URL
+              value: postgres://raccoon:raccoon@write-postgres:5432/raccoon
+            - name: RACCOON_SYNC__DATABASE__READ__TYPE
+              value: postgresql
+            - name: RACCOON_SYNC__DATABASE__READ__URL
+              value: postgres://raccoon:raccoon@read-postgres:5432/raccoon
+          readinessProbe:
+            exec:
+              command:
+                - grpc-healthcheck
+                - http://127.0.0.1:50051
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 20
+          livenessProbe:
+            exec:
+              command:
+                - grpc-healthcheck
+                - http://127.0.0.1:50051
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+          volumeMounts:
+            - name: objects
+              mountPath: /data/objects
+      volumes:
+        - name: objects
+          hostPath:
+            path: /var/lib/raccoon/objects
+            type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dicomweb-gateway
+  namespace: raccoon
+spec:
+  type: NodePort
+  selector:
+    app.kubernetes.io/name: dicomweb-gateway
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+      nodePort: 30081
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dicomweb-gateway
+  namespace: raccoon
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: dicomweb-gateway
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: dicomweb-gateway
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: worker
+      initContainers:
+        - name: wait-for-read-postgres
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - until nc -z read-postgres 5432; do sleep 2; done
+        - name: wait-for-ingest
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - until nc -z ingest 50051; do sleep 2; done
+        - name: wait-for-query
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - until nc -z query 50051; do sleep 2; done
+        - name: wait-for-retrieve
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - until nc -z retrieve 50051; do sleep 2; done
+      containers:
+        - name: dicomweb-gateway
+          image: siweiyang/raccoon:dicomweb-gateway
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+              name: http
+          envFrom:
+            - configMapRef:
+                name: raccoon-common-env
+          env:
+            - name: RACCOON_DICOMWEB_GATEWAY__DICOMWEB__BIND_ADDRESS
+              value: 0.0.0.0:8080
+            - name: RACCOON_DICOMWEB_GATEWAY__DICOMWEB__RENDER_CACHE__DIRECTORY
+              value: /data/dicomweb-render-cache
+            - name: RACCOON_DICOMWEB_GATEWAY__DCMTK__PATH
+              value: /opt/dcmtk/bin
+            - name: RACCOON_DICOMWEB_GATEWAY__DATABASE__TYPE
+              value: postgresql
+            - name: RACCOON_DICOMWEB_GATEWAY__DATABASE__URL
+              value: postgres://raccoon:raccoon@read-postgres:5432/raccoon
+            - name: RACCOON_DICOMWEB_GATEWAY__QUERY__ENDPOINT
+              value: http://query:50051
+          readinessProbe:
+            tcpSocket:
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 20
+          livenessProbe:
+            tcpSocket:
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+          volumeMounts:
+            - name: render-cache
+              mountPath: /data/dicomweb-render-cache
+      volumes:
+        - name: render-cache
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: c-move-destination
+  namespace: raccoon
+spec:
+  selector:
+    app.kubernetes.io/name: c-move-destination
+  ports:
+    - name: dimse
+      port: 11113
+      targetPort: 11113
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: c-move-destination
+  namespace: raccoon
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: c-move-destination
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: c-move-destination
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: worker
+      containers:
+        - name: storescp
+          image: siweiyang/raccoon:dicomweb-gateway
+          imagePullPolicy: IfNotPresent
+          command:
+            - /opt/dcmtk/bin/storescp
+          args:
+            - -v
+            - -aet
+            - RACCOON-MOVE
+            - +uf
+            - -od
+            - /data/c-move-destination
+            - "11113"
+          ports:
+            - containerPort: 11113
+              name: dimse
+          readinessProbe:
+            tcpSocket:
+              port: 11113
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 20
+          livenessProbe:
+            tcpSocket:
+              port: 11113
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+          volumeMounts:
+            - name: c-move-output
+              mountPath: /data/c-move-destination
+      volumes:
+        - name: c-move-output
+          hostPath:
+            path: /var/lib/raccoon/c-move-destination
+            type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dimse-gateway
+  namespace: raccoon
+spec:
+  type: NodePort
+  selector:
+    app.kubernetes.io/name: dimse-gateway
+  ports:
+    - name: dimse
+      port: 11112
+      targetPort: 11112
+      nodePort: 31112
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dimse-gateway
+  namespace: raccoon
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: dimse-gateway
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: dimse-gateway
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: worker
+      initContainers:
+        - name: wait-for-application-entity-registry
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - until nc -z application-entity-registry 50051; do sleep 2; done
+        - name: wait-for-ingest
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - until nc -z ingest 50051; do sleep 2; done
+        - name: wait-for-query
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - until nc -z query 50051; do sleep 2; done
+        - name: wait-for-retrieve
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - until nc -z retrieve 50051; do sleep 2; done
+      containers:
+        - name: dimse-gateway
+          image: siweiyang/raccoon:dimse-gateway
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 11112
+              name: dimse
+          envFrom:
+            - configMapRef:
+                name: raccoon-common-env
