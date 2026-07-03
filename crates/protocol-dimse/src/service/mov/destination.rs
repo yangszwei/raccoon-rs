@@ -1,9 +1,8 @@
 use std::collections::{HashMap, VecDeque};
 use std::io::Cursor;
-use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -21,6 +20,7 @@ use raccoon_service_application_entity_registry::{
 use tokio::net::TcpStream;
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
 
+use super::super::dataset::prepare_dimse_dataset;
 use super::provider::{
     MoveDestinationError, MoveDestinationStore, MoveStoreOutcome, MoveStoreRequest,
 };
@@ -30,14 +30,13 @@ use crate::service::storage::StorageServiceProvider;
 
 const DEFAULT_MAX_TOTAL_OUTBOUND_ASSOCIATIONS: usize = 16;
 const DEFAULT_MAX_IDLE_ASSOCIATIONS_PER_PEER_PROFILE: usize = 1;
-const DICOM_FILE_PREAMBLE_AND_PREFIX_LEN: usize = 132;
-const DICOM_FILE_PREFIX_OFFSET: usize = 128;
-
+const DEFAULT_MAX_IDLE_ASSOCIATION_AGE: Duration = Duration::from_secs(60);
 /// Runtime limits for AE-registry backed C-MOVE destination stores.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RegistryMoveDestinationStoreConfig {
     pub max_total_associations: usize,
     pub max_idle_per_peer_profile: usize,
+    pub max_idle_association_age: Duration,
 }
 
 impl Default for RegistryMoveDestinationStoreConfig {
@@ -45,6 +44,7 @@ impl Default for RegistryMoveDestinationStoreConfig {
         Self {
             max_total_associations: DEFAULT_MAX_TOTAL_OUTBOUND_ASSOCIATIONS,
             max_idle_per_peer_profile: DEFAULT_MAX_IDLE_ASSOCIATIONS_PER_PEER_PROFILE,
+            max_idle_association_age: DEFAULT_MAX_IDLE_ASSOCIATION_AGE,
         }
     }
 }
@@ -118,7 +118,7 @@ impl MoveDestinationStore for RegistryMoveDestinationStore {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct OutboundPoolKey {
     ae_title: String,
-    addr: SocketAddr,
+    addr: String,
     transfer_syntax_uid: String,
 }
 
@@ -126,7 +126,7 @@ impl OutboundPoolKey {
     fn new(peer: &PeerApplicationEntity, transfer_syntax_uid: String) -> Self {
         Self {
             ae_title: peer.title().as_str().to_string(),
-            addr: peer.addr(),
+            addr: peer.addr().to_string(),
             transfer_syntax_uid,
         }
     }
@@ -135,6 +135,7 @@ impl OutboundPoolKey {
 struct PooledOutboundAssociation {
     association: AsyncClientAssociation<TcpStream>,
     permit: OwnedSemaphorePermit,
+    idle_since: Instant,
 }
 
 struct CheckedOutAssociation {
@@ -200,12 +201,15 @@ impl OutboundStoreAssociationPool {
         key: OutboundPoolKey,
         transfer_syntax_uid: &str,
     ) -> Result<CheckedOutAssociation, MoveDestinationError> {
-        if let Some(pooled) = self.idle.lock().await.get_mut(&key).and_then(Vec::pop) {
-            return Ok(CheckedOutAssociation {
-                key,
-                association: pooled.association,
-                permit: pooled.permit,
-            });
+        while let Some(pooled) = self.idle.lock().await.get_mut(&key).and_then(Vec::pop) {
+            if pooled.idle_since.elapsed() <= self.config.max_idle_association_age {
+                return Ok(CheckedOutAssociation {
+                    key,
+                    association: pooled.association,
+                    permit: pooled.permit,
+                });
+            }
+            let _ = pooled.association.release().await;
         }
 
         let permit = self.permits.clone().acquire_owned().await.map_err(|_| {
@@ -230,6 +234,7 @@ impl OutboundStoreAssociationPool {
         entries.push(PooledOutboundAssociation {
             association: checked_out.association,
             permit: checked_out.permit,
+            idle_since: Instant::now(),
         });
     }
 }
@@ -283,7 +288,7 @@ async fn send_outbound_store(
         accepted_store_presentation_context(association, sop_class_uid, transfer_syntax_uid)?;
 
     let mut body = request.instance.body;
-    let buffered_chunks = buffer_dataset_prefix(&mut body).await?;
+    let buffered_chunks = prepare_dimse_dataset(&mut body).await?;
 
     let command = outbound_store_request_command(
         request.message_id,
@@ -361,33 +366,6 @@ fn accepted_store_presentation_context(
                 "no accepted presentation context for retrieved SOP Class UID {sop_class_uid} with Transfer Syntax UID {transfer_syntax_uid}"
             ))
         })
-}
-
-async fn buffer_dataset_prefix(
-    body: &mut raccoon_contract_object_store::ByteStream,
-) -> Result<VecDeque<Bytes>, DimseError> {
-    let mut buffered_chunks = VecDeque::new();
-    let mut prefix = Vec::with_capacity(DICOM_FILE_PREAMBLE_AND_PREFIX_LEN);
-
-    while prefix.len() < DICOM_FILE_PREAMBLE_AND_PREFIX_LEN {
-        let Some(chunk) = body.next().await else {
-            break;
-        };
-        let chunk = chunk.map_err(|error| DimseError::protocol(error.to_string()))?;
-        let prefix_remaining = DICOM_FILE_PREAMBLE_AND_PREFIX_LEN - prefix.len();
-        prefix.extend_from_slice(&chunk[..chunk.len().min(prefix_remaining)]);
-        buffered_chunks.push_back(chunk);
-    }
-
-    if prefix.len() >= DICOM_FILE_PREAMBLE_AND_PREFIX_LEN
-        && &prefix[DICOM_FILE_PREFIX_OFFSET..DICOM_FILE_PREAMBLE_AND_PREFIX_LEN] == b"DICM"
-    {
-        return Err(DimseError::protocol(
-            "retrieved instance appears to be a DICOM Part 10 file; outbound DIMSE C-STORE requires data set bytes",
-        ));
-    }
-
-    Ok(buffered_chunks)
 }
 
 fn outbound_store_request_command(
@@ -666,7 +644,6 @@ fn priority_code(priority: Priority) -> PrimitiveValue {
 #[cfg(test)]
 mod tests {
     use async_trait::async_trait;
-    use raccoon_contract_object_store::ByteStream;
     use raccoon_service_application_entity_registry::{
         ApplicationEntityRegistryError, InMemoryApplicationEntityRegistry,
     };
@@ -689,6 +666,7 @@ mod tests {
 
         assert_eq!(config.max_total_associations, 16);
         assert_eq!(config.max_idle_per_peer_profile, 1);
+        assert_eq!(config.max_idle_association_age, Duration::from_secs(60));
     }
 
     #[tokio::test]
@@ -775,39 +753,6 @@ mod tests {
             .expect_err("registry error should fail validation");
 
         assert!(matches!(error, MoveDestinationError::StoreFailed(_)));
-    }
-
-    #[tokio::test]
-    async fn buffer_dataset_prefix_preserves_dataset_chunks() {
-        let first = Bytes::from_static(&[0x01; 64]);
-        let second = Bytes::from_static(&[0x02; 80]);
-        let mut body = ByteStream::from_chunks([first.clone(), second.clone()]);
-
-        let buffered = buffer_dataset_prefix(&mut body)
-            .await
-            .expect("dataset prefix should pass");
-
-        assert_eq!(
-            buffered.into_iter().collect::<Vec<_>>(),
-            vec![first, second]
-        );
-    }
-
-    #[tokio::test]
-    async fn buffer_dataset_prefix_rejects_part_10_file_bytes() {
-        let mut prefix = [0_u8; DICOM_FILE_PREAMBLE_AND_PREFIX_LEN];
-        prefix[DICOM_FILE_PREFIX_OFFSET..DICOM_FILE_PREAMBLE_AND_PREFIX_LEN]
-            .copy_from_slice(b"DICM");
-        let mut body = ByteStream::from_chunks([
-            Bytes::copy_from_slice(&prefix[..64]),
-            Bytes::copy_from_slice(&prefix[64..]),
-        ]);
-
-        let error = buffer_dataset_prefix(&mut body)
-            .await
-            .expect_err("Part 10 bytes should not be sent as DIMSE data set");
-
-        assert!(matches!(error, DimseError::Protocol(_)));
     }
 
     fn store_response(message_id: u16) -> DimseCommand {

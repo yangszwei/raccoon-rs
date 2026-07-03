@@ -13,6 +13,7 @@ use raccoon_service_retrieve::{
     RetrieveError, RetrieveRequest, RetrieveScope, RetrieveService, RetrievedInstance,
 };
 
+use super::super::dataset::prepare_dimse_dataset;
 use super::message::{CGetRequest, CGetResponse, CGetStatus};
 use crate::association::AssociationContext;
 use crate::error::DimseError;
@@ -306,8 +307,12 @@ async fn send_store_suboperation(
     ctx.send_command_object(presentation_context_id, &command)
         .await?;
 
-    let mut payload = Vec::with_capacity(instance.content_length.min(usize::MAX as u64) as usize);
     let mut body = instance.body;
+    let buffered_chunks = prepare_dimse_dataset(&mut body).await?;
+    let mut payload = Vec::with_capacity(instance.content_length.min(usize::MAX as u64) as usize);
+    for chunk in buffered_chunks {
+        payload.extend_from_slice(&chunk);
+    }
     while let Some(chunk) = body.next().await {
         let chunk = chunk.map_err(|error| DimseError::protocol(error.to_string()))?;
         payload.extend_from_slice(&chunk);
@@ -527,5 +532,40 @@ fn retrieve_error_status(error: &RetrieveError) -> CGetStatus {
             CGetStatus::UnableToProcess
         }
         _ => CGetStatus::UnableToProcess,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use dicom_core::{DataElement, PrimitiveValue, VR};
+    use dicom_dictionary_std::{tags, uids};
+    use dicom_object::InMemDicomObject;
+
+    use super::*;
+
+    fn get_request() -> CGetRequest {
+        CGetRequest {
+            presentation_context_id: 1,
+            message_id: 1,
+            priority: Priority::Medium,
+            affected_sop_class_uid: uids::STUDY_ROOT_QUERY_RETRIEVE_INFORMATION_MODEL_GET
+                .to_string(),
+            originator_ae_title: None,
+        }
+    }
+
+    #[test]
+    fn study_level_without_uid_is_invalid_identifier() {
+        let mut identifier = InMemDicomObject::new_empty();
+        identifier.put(DataElement::new(
+            tags::QUERY_RETRIEVE_LEVEL,
+            VR::CS,
+            PrimitiveValue::from("STUDY"),
+        ));
+
+        let error =
+            build_retrieve_requests(&get_request(), &identifier).expect_err("missing study UID");
+
+        assert!(error.contains("missing required attribute (0020,000D)"));
     }
 }

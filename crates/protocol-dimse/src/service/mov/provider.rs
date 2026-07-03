@@ -532,3 +532,38 @@ fn destination_error_status(error: &MoveDestinationError) -> CMoveStatus {
         MoveDestinationError::StoreFailed(_) => CMoveStatus::UnableToProcess,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use dicom_core::{DataElement, PrimitiveValue, VR};
+    use dicom_dictionary_std::{tags, uids};
+    use dicom_object::InMemDicomObject;
+
+    use super::*;
+
+    fn move_request() -> CMoveRequest {
+        CMoveRequest {
+            presentation_context_id: 1,
+            message_id: 1,
+            priority: Priority::Medium,
+            affected_sop_class_uid: uids::STUDY_ROOT_QUERY_RETRIEVE_INFORMATION_MODEL_MOVE
+                .to_string(),
+            move_destination: "RACCOON-MOVE".to_string(),
+        }
+    }
+
+    #[test]
+    fn study_level_without_uid_is_invalid_identifier() {
+        let mut identifier = InMemDicomObject::new_empty();
+        identifier.put(DataElement::new(
+            tags::QUERY_RETRIEVE_LEVEL,
+            VR::CS,
+            PrimitiveValue::from("STUDY"),
+        ));
+
+        let error =
+            build_retrieve_requests(&move_request(), &identifier).expect_err("missing study UID");
+
+        assert!(error.contains("missing required attribute (0020,000D)"));
+    }
+}
