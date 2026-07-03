@@ -112,6 +112,12 @@ services:
       RACCOON_AE_REGISTRY__APPLICATION_ENTITIES__LOCAL__0__BIND_ADDRESS: 0.0.0.0:11112
       RACCOON_AE_REGISTRY__APPLICATION_ENTITIES__LOCAL__0__MAX_CONCURRENT_ASSOCIATIONS: 64
       RACCOON_AE_REGISTRY__APPLICATION_ENTITIES__LOCAL__0__MAX_PDU_LENGTH: 65536
+      RACCOON_AE_REGISTRY__APPLICATION_ENTITIES__PEER__0__TITLE: MOVESCP
+      RACCOON_AE_REGISTRY__APPLICATION_ENTITIES__PEER__0__ADDRESS: c-move-destination:11113
+      RACCOON_AE_REGISTRY__APPLICATION_ENTITIES__PEER__0__CONNECT_TIMEOUT_SECONDS: 5
+      RACCOON_AE_REGISTRY__APPLICATION_ENTITIES__PEER__0__READ_TIMEOUT_SECONDS: 30
+      RACCOON_AE_REGISTRY__APPLICATION_ENTITIES__PEER__0__WRITE_TIMEOUT_SECONDS: 30
+      RACCOON_AE_REGISTRY__APPLICATION_ENTITIES__PEER__0__MAX_PDU_LENGTH: 65536
     healthcheck:
       test: [ "CMD", "grpc-healthcheck", "http://127.0.0.1:50051" ]
       interval: 5s
@@ -180,6 +186,29 @@ services:
     volumes:
       - objects:/data/objects
 
+  c-move-destination:
+    image: raccoon-dicomweb-gateway:${IMAGE_TAG:-local}
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime-dcmtk
+      args:
+        PACKAGE: raccoon-dicomweb-gateway
+    entrypoint:
+      - /opt/dcmtk/bin/storescp
+    command:
+      - -v
+      - -aet
+      - MOVESCP
+      - +uf
+      - -od
+      - /data/c-move-destination
+      - "11113"
+    ports:
+      - "11113:11113"
+    volumes:
+      - c-move-destination:/data/c-move-destination
+
   sync:
     image: raccoon-sync:${IMAGE_TAG:-local}
     build:
@@ -208,6 +237,7 @@ services:
       - objects:/data/objects
 
 volumes:
+  c-move-destination:
   dicomweb-render-cache:
   objects:
   read-postgres-data:

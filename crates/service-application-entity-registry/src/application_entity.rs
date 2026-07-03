@@ -31,6 +31,9 @@ pub enum ApplicationEntityError {
 
     #[error("invalid address: {0}")]
     InvalidAddress(#[from] AddrParseError),
+
+    #[error("invalid peer address: expected host:port")]
+    InvalidPeerAddress,
 }
 
 /// DICOM AE title.
@@ -159,7 +162,7 @@ pub fn local_ae(title: &'static str, bind_addr: &'static str) -> LocalApplicatio
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PeerApplicationEntity {
     title: AeTitle,
-    addr: SocketAddr,
+    addr: String,
     connect_timeout_seconds: Option<u64>,
     read_timeout_seconds: Option<u64>,
     write_timeout_seconds: Option<u64>,
@@ -176,9 +179,11 @@ impl PeerApplicationEntity {
         write_timeout_seconds: Option<u64>,
         max_pdu_length: u32,
     ) -> Result<Self, ApplicationEntityError> {
+        validate_peer_addr(addr)?;
+
         Ok(Self {
             title: AeTitle::from_str(title)?,
-            addr: SocketAddr::from_str(addr)?,
+            addr: addr.to_string(),
             connect_timeout_seconds,
             read_timeout_seconds,
             write_timeout_seconds,
@@ -192,8 +197,8 @@ impl PeerApplicationEntity {
     }
 
     /// Return the peer socket address.
-    pub fn addr(&self) -> SocketAddr {
-        self.addr
+    pub fn addr(&self) -> &str {
+        &self.addr
     }
 
     pub fn connect_timeout_seconds(&self) -> Option<u64> {
@@ -211,6 +216,18 @@ impl PeerApplicationEntity {
     pub fn max_pdu_length(&self) -> u32 {
         self.max_pdu_length
     }
+}
+
+fn validate_peer_addr(addr: &str) -> Result<(), ApplicationEntityError> {
+    let Some((host, port)) = addr.rsplit_once(':') else {
+        return Err(ApplicationEntityError::InvalidPeerAddress);
+    };
+
+    if host.is_empty() || port.parse::<u16>().is_err() {
+        return Err(ApplicationEntityError::InvalidPeerAddress);
+    }
+
+    Ok(())
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -328,7 +345,7 @@ mod tests {
         .expect("valid peer entity");
 
         assert_eq!(peer.title().as_str(), "REMOTE_AE");
-        assert_eq!(peer.addr().to_string(), "192.0.2.10:104");
+        assert_eq!(peer.addr(), "192.0.2.10:104");
         assert_eq!(peer.connect_timeout_seconds(), Some(5));
         assert_eq!(peer.read_timeout_seconds(), Some(30));
         assert_eq!(peer.write_timeout_seconds(), Some(45));
@@ -336,7 +353,22 @@ mod tests {
     }
 
     #[test]
-    fn peer_try_new_rejects_invalid_socket_address() {
+    fn try_new_builds_peer_entity_with_dns_name() {
+        let peer = PeerApplicationEntity::try_new(
+            "REMOTE_AE",
+            "c-move-destination:11113",
+            Some(5),
+            Some(30),
+            Some(45),
+            65_536,
+        )
+        .expect("valid peer entity");
+
+        assert_eq!(peer.addr(), "c-move-destination:11113");
+    }
+
+    #[test]
+    fn peer_try_new_rejects_invalid_address() {
         let err = PeerApplicationEntity::try_new(
             "REMOTE_AE",
             "not-an-address",
@@ -347,6 +379,6 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(matches!(err, ApplicationEntityError::InvalidAddress(_)));
+        assert_eq!(err, ApplicationEntityError::InvalidPeerAddress);
     }
 }
