@@ -1,0 +1,6 @@
+# Encourage splitting functions before their control flow becomes difficult to
+# reason about.
+cognitive-complexity-threshold = 15
+
+# Encourage named aliases before composed types become hard to read.
+type-complexity-threshold = 200

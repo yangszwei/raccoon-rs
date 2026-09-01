@@ -1,0 +1,9 @@
+[package]
+name = "bairdi"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true
